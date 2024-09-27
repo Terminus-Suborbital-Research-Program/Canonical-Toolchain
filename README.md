@@ -2,14 +2,14 @@
 A template for the TERMINUS program's various RP2040/RP2350 architecture based RTIC applications
 
 
-## This is largely a slimmed down version of the rp-hal examples.
+## This is largely a slimmed down version of the rp-hal examples.\
 Link: https://github.com/rp-rs/rp-hal/tree/main
 
 
 To get started you will want the pico-sdk and picotool software installed on your development machine.
 
-Pico-SDK (Just download): https://github.com/raspberrypi/pico-sdk
-Picotool (Download and install): https://github.com/raspberrypi/picotool
+Pico-SDK (Just download): https://github.com/raspberrypi/pico-sdk\
+Picotool (Download and install): https://github.com/raspberrypi/picotool\
 Please see Appendix B, in the following document to build and install picotool: https://datasheets.raspberrypi.com/pico/getting-started-with-pico.pdf
 
 
