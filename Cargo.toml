@@ -29,3 +29,4 @@ pio-proc = "0.2.0"
 rp235x-hal = {path = "../rp-hal/rp235x-hal", version = "0.2.0", features = ["binary-info", "critical-section-impl", "rt", "defmt"]}
 usb-device = "0.3.2"
 usbd-serial = "0.2.2"
+bno055 = "*"
