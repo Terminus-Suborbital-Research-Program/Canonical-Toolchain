@@ -1,0 +1,46 @@
+[package]
+name = "canonical-toolchain"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# HAL for the RP2040 architecture
+rp2040-hal = "0.10.2"
+# Cortex-M peripherals
+cortex-m = "0.7.3"
+# Startup/Runtime for Cortex-M microcontrollers
+cortex-m-rt = "0.7.3"
+# Rust safe bindings to register-level control
+embedded-hal = "1.0.0"
+# Board support crate for the pico
+rp-pico = "0.9.0"
+# Simple panic handler
+panic-halt = "0.2.0"
+# RTIC for real-time operations
+rtic = {version = "2.1.1", features = ["thumbv6-backend"]}
+# Time
+embedded-time = "0.12.1"
+fugit = "0.3.7"
+
+# Dev and build configs
+
+# cargo build/run
+[profile.dev]
+codegen-units = 1
+debug = 2
+debug-assertions = true
+incremental = false
+opt-level = 3
+overflow-checks = true
+
+# cargo build/run --release
+[profile.release]
+codegen-units = 1
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = 3
+overflow-checks = false
+
+# TODO: Add profile for testing
