@@ -1,26 +1,28 @@
 [package]
 name = "canonical-toolchain"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [dependencies]
-# HAL for the RP2040 architecture
-rp2040-hal = "0.10.2"
+# HAL for the RP350X architecture
+rp235x-hal = {version="0.2.0", features = ["binary-info", "critical-section-impl", "rt", "defmt"]}
 # Cortex-M peripherals
 cortex-m = "0.7.3"
 # Startup/Runtime for Cortex-M microcontrollers
 cortex-m-rt = "0.7.3"
 # Rust safe bindings to register-level control
 embedded-hal = "1.0.0"
-# Board support crate for the pico
-rp-pico = "0.9.0"
 # Simple panic handler
 panic-halt = "0.2.0"
 # RTIC for real-time operations
-rtic = {version = "2.1.1", features = ["thumbv6-backend"]}
+rtic = {version = "2.1.1", features = ["thumbv8main-backend"]}
 # Time
 embedded-time = "0.12.1"
 fugit = "0.3.7"
+
+# logging
+defmt = "0.3"
+defmt-rtt = "0.4.0"
 
 # Dev and build configs
 
