@@ -11,7 +11,7 @@ rustflags = [
     "-C", "target-cpu=cortex-m33",
 ]
 
-runner = "picotool load -u -v -x -t elf"
+runner = "picotool/build/picotool load -u -v -x -t elf"
 
 [build]
 # Pick ONE of these compilation targets
