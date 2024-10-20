@@ -11,10 +11,23 @@ fn main() {
 
     // The file `memory.x` is loaded by cortex-m-rt's `link.x` script, which
     // is what we specify in `.cargo/config.toml` for Arm builds
-    let memory_x = include_bytes!("memory.x");
-    let mut f = File::create(out.join("memory.x")).unwrap();
-    f.write_all(memory_x).unwrap();
-    println!("cargo:rerun-if-changed=memory.x");
+    #[cfg(feature = "rp2350")]
+    {
+        let memory_x = include_bytes!("memory-rp2350.x");
+        let mut f = File::create(out.join("memory.x")).unwrap();
+        f.write_all(memory_x).unwrap();
+        println!("cargo:rustc-link-search={}", out.display());
+    }
+    #[cfg(feature = "rp2040")]
+    {
+        let memory_x = include_bytes!("memory-rp2040.x");
+        let mut f = File::create(out.join("memory.x")).unwrap();
+        f.write_all(memory_x).unwrap();
+        println!("cargo:rustc-link-search={}", out.display());
+    }
+
+    println!("cargo:rerun-if-changed=memory-rp2350.x");
+    println!("cargo:rerun-if-changed=memory-rp2040.x");
 
     // The file `rp235x_riscv.x` is what we specify in `.cargo/config.toml` for
     // RISC-V builds
