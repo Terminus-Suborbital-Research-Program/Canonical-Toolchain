@@ -4,3 +4,6 @@
 [submodule "picotool"]
 	path = picotool
 	url = https://github.com/raspberrypi/picotool.git
+[submodule "rtic"]
+	path = rtic
+	url = https://github.com/rtic-rs/rtic.git
