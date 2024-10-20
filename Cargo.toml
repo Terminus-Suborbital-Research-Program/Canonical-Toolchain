@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # HAL for the RP350X architecture
-rp235x-hal = {version="0.2.0", features = ["binary-info", "critical-section-impl", "rt", "defmt"]}
+rp235x-hal = {version="0.2.0", features = ["binary-info", "critical-section-impl", "rt", "defmt", "rtic-monotonic"]}
 # Cortex-M peripherals
 cortex-m = "0.7.3"
 # Startup/Runtime for Cortex-M microcontrollers
@@ -16,6 +16,7 @@ embedded-hal = "1.0.0"
 panic-halt = "0.2.0"
 # RTIC for real-time operations
 rtic = {version = "2.1.1", features = ["thumbv8main-backend"]}
+rtic-monotonics = {version="2.0.2", features = ["rp235x"], path="./rtic/rtic-monotonics"}
 # Time
 embedded-time = "0.12.1"
 fugit = "0.3.7"
