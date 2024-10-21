@@ -35,6 +35,7 @@ mod app {
             self, bank0::Gpio25, FunctionSio, PullNone, SioOutput
         }, sio::Sio,
     };
+    use rp235x_hal::{clocks::init_clocks_and_plls, Watchdog};
 
     const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
@@ -48,6 +49,22 @@ mod app {
 
     #[init]
     fn init(mut ctx: init::Context) -> (Shared, Local) {
+        // Reset the spinlocks - this is scipped by soft-reset
+        unsafe {
+            hal::sio::spinlock_reset();
+        }
+
+        // Set up clocks
+        let mut watchdog = Watchdog::new(ctx.device.WATCHDOG);
+        let _clocks = init_clocks_and_plls(
+            XTAL_FREQ_HZ,
+            ctx.device.XOSC,
+            ctx.device.CLOCKS,
+            ctx.device.PLL_SYS,
+            ctx.device.PLL_USB,
+            &mut ctx.device.RESETS,
+            &mut watchdog,
+        ).ok().unwrap();
 
         Mono::start(ctx.device.TIMER0, &ctx.device.RESETS);
 
