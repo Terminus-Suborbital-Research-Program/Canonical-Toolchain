@@ -4,14 +4,12 @@
 
 use panic_halt as _;
 
-#[cfg(all(feature = "rp2350", feature = "rp2040"))]
-compile_error!("Too many features!");
+#[cfg(all(feature = "rp2040"))]
+compile_error!("RP2040 Support Deprecated");
 
 // HAL Access
 #[cfg(feature = "rp2350")]
 use rp235x_hal as hal;
-#[cfg(feature = "rp2040")]
-use rp2040_hal as hal;
 
 // Monotonics
 #[cfg(feature = "rp2350")]
@@ -26,7 +24,8 @@ rp235x_timer_monotonic!(Mono);
 pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef::secure_exe();
 
 #[rtic::app(
-    device = hal::pac
+    device = hal::pac,
+    dispatchers = [PIO2_IRQ_0, PIO2_IRQ_1],
 )]
 mod app {
     use super::*;
@@ -66,16 +65,17 @@ mod app {
         // Configure GPIO25 as an output
         let mut led_pin = pins.gpio25.into_pull_type::<PullNone>().into_push_pull_output();
         led_pin.set_low().unwrap();
-        blink::spawn().ok();
+        heartbeat::spawn().ok();
         (Shared {}, Local {led: led_pin})
     }
 
-    #[task(local = [led])]
-    async fn blink(ctx: blink::Context) {
+    // Heartbeats the main led
+    #[task(local = [led], priority = 1)]
+    async fn heartbeat(ctx: heartbeat::Context) {
         loop {
             _ = ctx.local.led.toggle();
 
-            Mono::delay(1000.millis()).await;
+            Mono::delay(500.millis()).await;
         }
     }
 }
