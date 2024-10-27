@@ -39,7 +39,7 @@ mod app {
     // Core Functions
     use core::fmt::Write;
     use dynamics::state::dynamics::State;
-    use embedded_hal::digital::{OutputPin, StatefulOutputPin};
+    use embedded_hal::{delay::DelayNs, digital::{OutputPin, StatefulOutputPin}};
     use bno055::mint;
     use hal::{
         gpio::{
@@ -49,7 +49,7 @@ mod app {
     };
     use fugit::RateExtU32;
     use rp235x_hal::{
-        clocks::init_clocks_and_plls, i2c, pac::{accessctrl::watchdog, I2C1}, uart::{
+        clocks::{init_clocks_and_plls, ClocksManager}, i2c, pac::{accessctrl::watchdog, I2C1}, uart::{
             DataBits, StopBits, UartConfig, UartPeripheral, ValidUartPinout, 
         }, Clock, Watchdog, I2C
     };
@@ -63,7 +63,8 @@ mod app {
     struct Shared {
         uart0: UARTBus,
         dynamics: State,
-        bno: BNO055_Device
+        bno: BNO055_Device,
+        timer1: rp235x_hal::Timer<rp235x_hal::timer::CopyableTimer1>
     }
 
     #[local]
@@ -112,7 +113,7 @@ mod app {
         heartbeat::spawn().ok();
 
         let uart_pins =  (pins.gpio16.into_function(), pins.gpio17.into_function());
-        let uart_peripheral = UartPeripheral::new(ctx.device.UART0, uart_pins, &mut ctx.device.RESETS).enable(
+        let mut uart_peripheral = UartPeripheral::new(ctx.device.UART0, uart_pins, &mut ctx.device.RESETS).enable(
             UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
             clocks.peripheral_clock.freq()
         ).unwrap();
@@ -127,25 +128,34 @@ mod app {
             &mut ctx.device.RESETS, 
             &clocks.system_clock
         );
-
-        let mut timer = hal::Timer::new_timer1(ctx.device.TIMER1, &mut ctx.device.RESETS, &clocks);
         let mut imu: bno055::Bno055<I2C<I2C1, (gpio::Pin<gpio::bank0::Gpio14, gpio::FunctionI2c, gpio::PullUp>, gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionI2c, gpio::PullUp>)>> = bno055::Bno055::new(i2c1).with_alternative_address();
-        imu.set_mode(bno055::BNO055OperationMode::NDOF, &mut timer).expect("Could not set IMU Mode...");
+        let mut timer1: rp235x_hal::Timer<rp235x_hal::timer::CopyableTimer1> = hal::Timer::new_timer1(ctx.device.TIMER1, &mut ctx.device.RESETS, &clocks);
+        uart_peripheral.write_full_blocking(b"Terminus Flight Software\n");
+
+        imu.set_mode(bno055::BNO055OperationMode::NDOF, &mut timer1).expect("Could not set IMU Mode...");
         imu.set_power_mode(bno055::BNO055PowerMode::NORMAL);
-        let calib = imu.calibration_profile(&mut timer).unwrap();
-        imu.set_calibration_profile(calib, &mut timer).unwrap();
+        let mut status = imu.get_calibration_status().unwrap();
+        uart_peripheral.write_fmt(format_args!("IMU Calibration status: {:?}\n", status));
+        while(!imu.is_fully_calibrated().unwrap()){
+            status = imu.get_calibration_status().unwrap();
+            uart_peripheral.write_fmt(format_args!("IMU Calibration Status: {:?}\n", status));
+            timer1.delay_ms(1000);
+        }
+        let calib = imu.calibration_profile(&mut timer1).unwrap();
+        imu.set_calibration_profile(calib, &mut timer1).unwrap();                    
+
 
         let dynamics = State::default();
 
-
-        controls::spawn().ok();
-        telemetry::spawn().ok();
         imu_sample::spawn().ok();
+        telemetry::spawn().ok();
+        controls::spawn().ok();
         (
             Shared {
                 uart0: uart_peripheral,
                 dynamics: dynamics,
-                bno: imu
+                bno: imu,
+                timer1: timer1
             }, 
             Local {
                 led: led_pin
@@ -171,15 +181,26 @@ mod app {
         }
     }
 
+    // #[task(shared=[uart0, bno, timer1], priority = 1)]
+    // async fn imu_calibrate(mut ctx: imu_calibrate::Context) {
+    //     loop{
+            
+    //         ctx.shared.bno.lock(|imu|{
+    //             ctx.shared.timer1.lock(|timer|{
+    //             });
+    //         }
+    //         );
+    //         Mono::delay(1000.millis()).await;
+    //     }
+    // }
+
     #[task(shared=[uart0, dynamics, bno], priority = 1)]
     async fn imu_sample(mut ctx: imu_sample::Context) {
         loop{
             ctx.shared.bno.lock(|imu|{
                     let ab = imu.accel_data().expect("Could not, get accelerometer data.");
                     ctx.shared.dynamics.lock(|dynamics|{
-                            dynamics.ab[0] = ab.x as f64;
-                            dynamics.ab[1] = ab.y as f64;
-                            dynamics.ab[2] = ab.z as f64;
+                            dynamics.ab = heapless::Vec::from_slice(&[ab.x, ab.y, ab.z]).expect("Could not create slice.");
                         }
                     );
                 }
@@ -198,8 +219,8 @@ mod app {
                 }
             );
             ctx.shared.uart0.lock(|uart0|{
-                    let string: heapless::String<256> = serde_json_core::to_string(&dynamics_local).unwrap();
-                    uart0.write_fmt(format_args!("{}\n", string.as_str())).expect("Could not write telemetry.");
+                    let dynamics_local: heapless::String<256> = serde_json_core::to_string(&dynamics_local).unwrap();
+                    uart0.write_fmt(format_args!("{}\n", dynamics_local.as_str())).expect("Could not write telemetry.");
                 }
             );
             Mono::delay(1000.millis()).await;
