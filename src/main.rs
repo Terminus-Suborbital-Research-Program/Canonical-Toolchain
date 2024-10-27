@@ -7,6 +7,8 @@ use core::cell::RefCell;
 use cortex_m::interrupt::Mutex;
 use panic_halt as _;
 
+mod dynamics;
+
 #[cfg(all(feature = "rp2040"))]
 compile_error!("RP2040 Support Deprecated");
 
@@ -36,8 +38,9 @@ mod app {
     use super::*;
     // Core Functions
     use core::fmt::Write;
-    use defmt::println;
+    use dynamics::state::dynamics::State;
     use embedded_hal::digital::{OutputPin, StatefulOutputPin};
+    use bno055::mint;
     use hal::{
         gpio::{
             self, bank0::{Gpio25, Gpio17, Gpio16}, FunctionSio, PullNone, SioOutput
@@ -46,20 +49,21 @@ mod app {
     };
     use fugit::RateExtU32;
     use rp235x_hal::{
-        clocks::init_clocks_and_plls, 
-        uart::{
-            DataBits, State, StopBits, UartConfig, UartPeripheral, ValidUartPinout, 
-        },
-        Clock, 
-        Watchdog
+        clocks::init_clocks_and_plls, i2c, pac::{accessctrl::watchdog, I2C1}, uart::{
+            DataBits, StopBits, UartConfig, UartPeripheral, ValidUartPinout, 
+        }, Clock, Watchdog, I2C
     };
     const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
     type UARTBus = UartPeripheral<rp235x_hal::uart::Enabled, rp235x_hal::pac::UART0, (gpio::Pin<Gpio16, gpio::FunctionUart, gpio::PullDown>, gpio::Pin<Gpio17, gpio::FunctionUart, gpio::PullDown>)>;
+    type I2C1Bus = I2C<I2C1, (gpio::Pin<gpio::bank0::Gpio14, gpio::FunctionI2c, gpio::PullUp>, gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionI2c, gpio::PullUp>)>;
+    type BNO055_Device = bno055::Bno055<I2C<I2C1, (gpio::Pin<gpio::bank0::Gpio14, gpio::FunctionI2c, gpio::PullUp>, gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionI2c, gpio::PullUp>)>>;
 
     #[shared]
     struct Shared {
-        uart0: UARTBus
+        uart0: UARTBus,
+        dynamics: State,
+        bno: BNO055_Device
     }
 
     #[local]
@@ -112,14 +116,36 @@ mod app {
             UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
             clocks.peripheral_clock.freq()
         ).unwrap();
-        uart_peripheral.write_full_blocking(b"UART Started.\n");
+
+        let sda_pin = pins.gpio14.reconfigure();
+        let scl_pin = pins.gpio15.reconfigure();
+        let i2c1: I2C<I2C1, (gpio::Pin<gpio::bank0::Gpio14, gpio::FunctionI2c, gpio::PullUp>, gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionI2c, gpio::PullUp>)> = I2C::i2c1(
+            ctx.device.I2C1, 
+            sda_pin, 
+            scl_pin, 
+            400.kHz(), 
+            &mut ctx.device.RESETS, 
+            &clocks.system_clock
+        );
+
+        let mut timer = hal::Timer::new_timer1(ctx.device.TIMER1, &mut ctx.device.RESETS, &clocks);
+        let mut imu: bno055::Bno055<I2C<I2C1, (gpio::Pin<gpio::bank0::Gpio14, gpio::FunctionI2c, gpio::PullUp>, gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionI2c, gpio::PullUp>)>> = bno055::Bno055::new(i2c1).with_alternative_address();
+        imu.set_mode(bno055::BNO055OperationMode::NDOF, &mut timer).expect("Could not set IMU Mode...");
+        imu.set_power_mode(bno055::BNO055PowerMode::NORMAL);
+        let calib = imu.calibration_profile(&mut timer).unwrap();
+        imu.set_calibration_profile(calib, &mut timer).unwrap();
+
+        let dynamics = State::default();
+
 
         controls::spawn().ok();
         telemetry::spawn().ok();
-
+        imu_sample::spawn().ok();
         (
             Shared {
-                uart0: uart_peripheral
+                uart0: uart_peripheral,
+                dynamics: dynamics,
+                bno: imu
             }, 
             Local {
                 led: led_pin
@@ -145,15 +171,39 @@ mod app {
         }
     }
 
-    // Telemetry
-    #[task(shared=[uart0], priority = 2)]
-    async fn telemetry(mut ctx: telemetry::Context) {
-        loop {
-            ctx.shared.uart0.lock(|uart0|{
-                    uart0.write_full_blocking(b"RTIC Yeet\n");
+    #[task(shared=[uart0, dynamics, bno], priority = 1)]
+    async fn imu_sample(mut ctx: imu_sample::Context) {
+        loop{
+            ctx.shared.bno.lock(|imu|{
+                    let ab = imu.accel_data().expect("Could not, get accelerometer data.");
+                    ctx.shared.dynamics.lock(|dynamics|{
+                            dynamics.ab[0] = ab.x as f64;
+                            dynamics.ab[1] = ab.y as f64;
+                            dynamics.ab[2] = ab.z as f64;
+                        }
+                    );
                 }
             );
-            Mono::delay(100.millis()).await;
         }
     }
+
+    // Telemetry
+    #[task(shared=[uart0, dynamics], priority = 2)]
+    async fn telemetry(mut ctx: telemetry::Context) {
+        let mut dynamics_local = dynamics::state::dynamics::State::default();
+        loop {
+
+            ctx.shared.dynamics.lock(|dynamics|{
+                    dynamics_local = dynamics.clone();
+                }
+            );
+            ctx.shared.uart0.lock(|uart0|{
+                    let string: heapless::String<256> = serde_json_core::to_string(&dynamics_local).unwrap();
+                    uart0.write_fmt(format_args!("{}\n", string.as_str())).expect("Could not write telemetry.");
+                }
+            );
+            Mono::delay(1000.millis()).await;
+        }
+    }
+
 }
