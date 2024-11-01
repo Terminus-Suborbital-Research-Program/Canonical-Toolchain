@@ -20,6 +20,9 @@ panic-halt = "0.2.0"
 # RTIC for real-time operations
 rtic = {version = "2.1.1"}
 rtic-monotonics = {version="2.0.2", path="./rtic/rtic-monotonics"}
+# USB Device Support
+usb-device = "0.3.2"
+usbd-serial = "0.2.2"
 # Time
 embedded-time = "0.12.1"
 fugit = "0.3.7"
