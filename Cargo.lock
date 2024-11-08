@@ -767,7 +767,7 @@ checksum = "fb8b0b822d1a366470b9cea83a1d4e788392db763539dc4ba022bcc787fece82"
 
 [[package]]
 name = "rtic-monotonics"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "cfg-if",
  "cortex-m",
