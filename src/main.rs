@@ -128,8 +128,8 @@ mod app {
             USB_BUS.as_ref().unwrap()
         };
 
-        let mut serial = SerialPort::new(usb_bus_ref);
-        let mut usb_dev = UsbDeviceBuilder::new(usb_bus_ref, UsbVidPid(0x16c0, 0x27dd))
+        let serial = SerialPort::new(usb_bus_ref);
+        let usb_dev = UsbDeviceBuilder::new(usb_bus_ref, UsbVidPid(0x16c0, 0x27dd))
             .strings(&[StringDescriptors::default()
                 .manufacturer("UAH TERMINUS PROGRAM")
                 .product("Canonical Toolchain USB Serial Port")
