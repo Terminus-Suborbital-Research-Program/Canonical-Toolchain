@@ -25,7 +25,7 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
 
 #[rtic::app(
     device = hal::pac,
-    dispatchers = [PIO2_IRQ_0, PIO2_IRQ_1],
+    dispatchers = [PIO2_IRQ_0, PIO2_IRQ_1, DMA_IRQ_0],
 )]
 mod app {
     use super::*;
@@ -38,27 +38,39 @@ mod app {
     };
     use fugit::RateExtU32;
     use rp235x_hal::{
-        clocks::init_clocks_and_plls, 
-        uart::{
+        clocks::init_clocks_and_plls, gpio::{bank0::{Gpio0, Gpio1}, new_pin}, uart::{
             DataBits, StopBits, UartConfig, UartPeripheral, 
-        },
-        Clock, 
-        Watchdog
+        }, Clock, Watchdog
     };
     const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
     use usb_device::{class_prelude::*, prelude::*};
     use usbd_serial::SerialPort;
 
-    type UARTBus = UartPeripheral<rp235x_hal::uart::Enabled, rp235x_hal::pac::UART0, (gpio::Pin<Gpio16, gpio::FunctionUart, gpio::PullDown>, gpio::Pin<Gpio17, gpio::FunctionUart, gpio::PullDown>)>;
+    use rtic_sync::{
+        channel::{
+            Receiver,
+            Sender,
+        },
+        make_channel,
+    };
+
+    type UARTBus = UartPeripheral<rp235x_hal::uart::Enabled, rp235x_hal::pac::UART0, (gpio::Pin<Gpio0, gpio::FunctionUart, gpio::PullDown>, gpio::Pin<Gpio1, gpio::FunctionUart, gpio::PullDown>)>;
 
     static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
 
+    // Max number of lines to buffer in the USB console
+    const MAX_USB_LINES: usize = 5;
+    // Default length of buffer strings used
+    const HEAPLESS_STRING_ALLOC_LENGTH: usize = 64;
+    // Typedef for heapless string
+    type HeaplessString = heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>;
+
     #[shared]
-    struct Shared<'a> {
+    struct Shared {
         uart0: UARTBus,
         usb_serial: SerialPort<'static, hal::usb::UsbBus>,
-        usb_device: UsbDevice<'static, hal::usb::UsbBus>
+        usb_device: UsbDevice<'static, hal::usb::UsbBus>,
     }
 
     #[local]
@@ -72,6 +84,8 @@ mod app {
         unsafe {
             hal::sio::spinlock_reset();
         }
+
+        let (s,r) = make_channel!(HeaplessString, MAX_USB_LINES);        
 
         // Set up clocks
         let mut watchdog = Watchdog::new(ctx.device.WATCHDOG);
@@ -106,12 +120,12 @@ mod app {
 
         heartbeat::spawn().ok();
 
-        let uart_pins =  (pins.gpio16.into_function(), pins.gpio17.into_function());
+        // Pin setup for UART
+        let uart_pins =  (pins.gpio0.into_function(), pins.gpio1.into_function());
         let uart_peripheral = UartPeripheral::new(ctx.device.UART0, uart_pins, &mut ctx.device.RESETS).enable(
             UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
             clocks.peripheral_clock.freq()
         ).unwrap();
-        uart_peripheral.write_full_blocking(b"UART Started.\n");
 
         // Set up USB Device allocator
         let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
@@ -138,14 +152,14 @@ mod app {
             .device_class(2)
             .build();
 
-        usb_serial_hello::spawn().ok();
-        telemetry::spawn().ok();
+        send_usb_lines::spawn(r).ok();
+        usb_console_reader::spawn(s).ok();
 
         (
             Shared {
                 uart0: uart_peripheral,
                 usb_device: usb_dev,
-                usb_serial: serial
+                usb_serial: serial,
             }, 
             Local {
                 led: led_pin
@@ -163,44 +177,70 @@ mod app {
         }
     }
 
-    // USB Serial Echo
-    #[task(priority = 2, shared=[usb_device, usb_serial])]
-    async fn usb_serial_hello(mut ctx: usb_serial_hello::Context) {
-        // Set up usb device
+    #[task(priority = 3, shared = [usb_device, usb_serial])]
+    async fn usb_console_reader(mut ctx: usb_console_reader::Context, mut usb_line_sender: Sender<'static, heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>) {
+        let mut buf = [0u8; 64];
+        let mut command_buffer = heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>::new();
+
+        let mut end_of_line = false;
+
         loop {
             ctx.shared.usb_device.lock(|usb_dev| {
-                ctx.shared.usb_serial.lock(|serial| {  
+                ctx.shared.usb_serial.lock(|serial| {
                     if usb_dev.poll(&mut [serial]) {
-                        let mut buf = [0u8; 64];
+                        // For the moment, we're just going to echo back the input, after a newline
                         match serial.read(&mut buf) {
-                            Ok(count) => {
-                                // Convert to upper
-                                buf.iter_mut().take(count).for_each(|b| {
-                                    b.make_ascii_uppercase();
-                                });
+                            Ok(count) if count > 0 => {
+                                // Collect buffer into an array
+                                let bytes = &buf[..count];
+                                for byte in bytes.iter() {
+                                    // Conv to char
+                                    let c = *byte as char;
 
-                                // Send back
-                                let mut wr_ptr = &buf[..count];
-                                while !wr_ptr.is_empty() {
-                                    match serial.write(wr_ptr) {
-                                        Ok(len) => wr_ptr = &wr_ptr[len..],
-
-                                        Err(_) => break,
+                                    // Detect eol
+                                    if c == '\n' {
+                                        end_of_line = true;
                                     }
+
+                                    // Append to buffer
+                                    command_buffer.push(c).ok();
                                 }
                             }
 
-                            Err(_) => {
-
+                            _ => {
+                                // Ignore errors on read, assume it was just a desync
                             }
                         }
                     }
-                });
+                })
             });
 
+            if end_of_line {
+                // Now that we've released the usb lock, we can send it back
+                usb_line_sender.try_send(command_buffer.clone()).ok();
+                end_of_line = false;
+            }
+
+            // Wait for a bit to poll again
             Mono::delay(100.micros()).await;
         }
-        
+    }
+
+    #[task(priority = 3, shared = [usb_device, usb_serial])]
+    async fn send_usb_lines(mut ctx: send_usb_lines::Context, mut reciever: Receiver<'static, heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>) {
+        while let Ok(line) = reciever.recv().await {
+            ctx.shared.usb_device.lock(|_usb_dev| {
+                ctx.shared.usb_serial.lock(|serial| {
+                    let mut wr_ptr = line.as_bytes();
+                    while !wr_ptr.is_empty() {
+                        match serial.write(wr_ptr) {
+                            Ok(len) => wr_ptr = &wr_ptr[len..],
+                            Err(_) => break
+                        }
+                    }
+                })
+            })
+        }
     }
 
     // UART Serial

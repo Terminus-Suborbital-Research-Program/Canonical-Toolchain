@@ -73,11 +73,13 @@ dependencies = [
  "embedded-hal 1.0.0",
  "embedded-time",
  "fugit",
+ "heapless",
  "panic-halt",
  "rp2040-hal",
  "rp235x-hal",
  "rtic",
  "rtic-monotonics",
+ "rtic-sync",
  "usb-device",
  "usbd-serial",
 ]
@@ -206,6 +208,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c4c685bbef7fe13c3c6dd4da26841ed3980ef33e841cddfa15ce8a8fb3f1884"
 dependencies = [
  "embedded-hal 1.0.0",
+]
+
+[[package]]
+name = "embedded-hal-bus"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57b4e6ede84339ebdb418cd986e6320a34b017cdf99b5cc3efceec6450b06886"
+dependencies = [
+ "critical-section",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
 ]
 
 [[package]]
@@ -734,6 +747,15 @@ dependencies = [
 
 [[package]]
 name = "rtic-common"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0786b50b81ef9d2a944a000f60405bb28bf30cd45da2d182f3fe636b2321f35c"
+dependencies = [
+ "critical-section",
+]
+
+[[package]]
+name = "rtic-common"
 version = "1.0.1"
 dependencies = [
  "critical-section",
@@ -779,6 +801,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtic-sync"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49b1200137ccb2bf272a1801fa6e27264535facd356cb2c1d5bc8e12aa211bad"
+dependencies = [
+ "critical-section",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "heapless",
+ "portable-atomic",
+ "rtic-common 1.0.0",
+]
+
+[[package]]
 name = "rtic-time"
 version = "2.0.0"
 dependencies = [
@@ -787,7 +824,7 @@ dependencies = [
  "embedded-hal-async",
  "fugit",
  "futures-util",
- "rtic-common",
+ "rtic-common 1.0.1",
 ]
 
 [[package]]
