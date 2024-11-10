@@ -2,6 +2,9 @@
 #![no_std]
 #![no_main]
 
+mod hc12;
+mod serial_handler;
+
 use panic_halt as _;
 
 #[cfg(all(feature = "rp2040"))]
@@ -29,23 +32,24 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
 )]
 mod app {
     use super::*;
+    use canonical_toolchain::{println, print};
     use embedded_hal::digital::{OutputPin, StatefulOutputPin};
     use hal::{
         gpio::{
-            self, bank0::{Gpio25, Gpio17, Gpio16}, FunctionSio, PullNone, SioOutput
+            self, FunctionSio, PullNone, SioOutput
         }, 
         sio::Sio,
     };
     use fugit::RateExtU32;
     use rp235x_hal::{
-        clocks::init_clocks_and_plls, gpio::{bank0::{Gpio0, Gpio1}, new_pin}, uart::{
+        clocks::init_clocks_and_plls, uart::{
             DataBits, StopBits, UartConfig, UartPeripheral, 
         }, Clock, Watchdog
     };
     const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
     use usb_device::{class_prelude::*, prelude::*};
-    use usbd_serial::SerialPort;
+    use usbd_serial::{embedded_io::Write, SerialPort};
 
     use rtic_sync::{
         channel::{
@@ -55,27 +59,27 @@ mod app {
         make_channel,
     };
 
-    type UARTBus = UartPeripheral<rp235x_hal::uart::Enabled, rp235x_hal::pac::UART0, (gpio::Pin<Gpio0, gpio::FunctionUart, gpio::PullDown>, gpio::Pin<Gpio1, gpio::FunctionUart, gpio::PullDown>)>;
+    use hc12::UARTBus;
 
     static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
 
-    // Max number of lines to buffer in the USB console
-    const MAX_USB_LINES: usize = 5;
-    // Default length of buffer strings used
-    const HEAPLESS_STRING_ALLOC_LENGTH: usize = 64;
-    // Typedef for heapless string
-    type HeaplessString = heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>;
+    use serial_handler::{
+        MAX_USB_LINES,
+        HEAPLESS_STRING_ALLOC_LENGTH,
+        HeaplessString,
+    };
 
     #[shared]
     struct Shared {
         uart0: UARTBus,
         usb_serial: SerialPort<'static, hal::usb::UsbBus>,
         usb_device: UsbDevice<'static, hal::usb::UsbBus>,
+        serial_console_writer: serial_handler::SerialWriter,
     }
 
     #[local]
     struct Local {
-        led: gpio::Pin<Gpio25, FunctionSio<SioOutput>, PullNone>
+        led: gpio::Pin<gpio::bank0::Gpio25, FunctionSio<SioOutput>, PullNone>
     }
 
     #[init]
@@ -85,7 +89,11 @@ mod app {
             hal::sio::spinlock_reset();
         }
 
-        let (s,r) = make_channel!(HeaplessString, MAX_USB_LINES);        
+        // Channel for sending strings to the USB console
+        let (usb_console_line_sender,usb_console_line_receiver) = make_channel!(HeaplessString, MAX_USB_LINES);
+        
+        // Channel for incoming commands from the USB console
+        let (usb_console_command_sender, usb_console_command_receiver) = make_channel!(HeaplessString, MAX_USB_LINES);
 
         // Set up clocks
         let mut watchdog = Watchdog::new(ctx.device.WATCHDOG);
@@ -112,7 +120,6 @@ mod app {
             sio.gpio_bank0,
             &mut ctx.device.RESETS,
         );
-
 
         // Configure GPIO25 as an output
         let mut led_pin = pins.gpio25.into_pull_type::<PullNone>().into_push_pull_output();
@@ -152,15 +159,20 @@ mod app {
             .device_class(2)
             .build();
 
-        send_usb_lines::spawn(r).ok();
-        usb_console_reader::spawn(s).ok();
+        usb_serial_console_printer::spawn(usb_console_line_receiver).ok();
+        usb_console_reader::spawn(usb_console_command_sender).ok();
+        command_handler::spawn(usb_console_command_receiver).ok();
+
+        // Serial Writer Structure
+        let serial_console_writer = serial_handler::SerialWriter::new(usb_console_line_sender);
 
         (
             Shared {
                 uart0: uart_peripheral,
                 usb_device: usb_dev,
                 usb_serial: serial,
-            }, 
+                serial_console_writer,
+            },
             Local {
                 led: led_pin
             }
@@ -177,8 +189,8 @@ mod app {
         }
     }
 
-    #[task(priority = 3, shared = [usb_device, usb_serial])]
-    async fn usb_console_reader(mut ctx: usb_console_reader::Context, mut usb_line_sender: Sender<'static, heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>) {
+    #[task(priority = 3, shared = [usb_device, usb_serial, serial_console_writer])]
+    async fn usb_console_reader(mut ctx: usb_console_reader::Context, mut command_sender: Sender<'static, heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>) {
         let mut buf = [0u8; 64];
         let mut command_buffer = heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>::new();
 
@@ -197,9 +209,13 @@ mod app {
                                     // Conv to char
                                     let c = *byte as char;
 
+                                    // Write to serial to echo
+                                    serial.write(&[*byte]).ok();
+
                                     // Detect eol
-                                    if c == '\n' {
+                                    if c == '\r' || c == '\n' {
                                         end_of_line = true;
+                                        serial.write_all("\r\n".as_bytes()).ok();
                                     }
 
                                     // Append to buffer
@@ -216,19 +232,26 @@ mod app {
             });
 
             if end_of_line {
-                // Now that we've released the usb lock, we can send it back
-                usb_line_sender.try_send(command_buffer.clone()).ok();
                 end_of_line = false;
+                // Send the command to the command handler
+                command_sender.try_send(command_buffer.clone()).ok();
+                command_buffer.clear();
             }
 
             // Wait for a bit to poll again
-            Mono::delay(100.micros()).await;
+            Mono::delay(1000.micros()).await;
         }
     }
 
     #[task(priority = 3, shared = [usb_device, usb_serial])]
-    async fn send_usb_lines(mut ctx: send_usb_lines::Context, mut reciever: Receiver<'static, heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>) {
-        while let Ok(line) = reciever.recv().await {
+    async fn usb_serial_console_printer(mut ctx: usb_serial_console_printer::Context, mut reciever: Receiver<'static, heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>) {
+        while let Ok(mut line) = reciever.recv().await {
+            // If the line ends with a newline, pop it off, and then add a \r\n
+            if line.ends_with('\n') {
+                line.pop();
+                line.push_str("\r\n").ok();
+            }
+            
             ctx.shared.usb_device.lock(|_usb_dev| {
                 ctx.shared.usb_serial.lock(|serial| {
                     let mut wr_ptr = line.as_bytes();
@@ -243,14 +266,42 @@ mod app {
         }
     }
 
+    // Command Handler
+    #[task(shared=[serial_console_writer], priority = 2)]
+    async fn command_handler(mut ctx: command_handler::Context, mut reciever: Receiver<'static, heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>) {
+        while let Ok(line) = reciever.recv().await {
+            // Split into commands and arguments, on whitespace
+            let mut parts = line.split_whitespace();
+
+            // Get the command
+            let command = parts.next().unwrap_or_default();
+
+            match command {
+                "usb_reboot" => {
+                    // Reboots to the USB bootloader interface
+                    println!(ctx, "Rebooting...");
+
+                    hal::reboot::reboot(
+                        hal::reboot::RebootKind::BootSel {
+                            picoboot_disabled: false,
+                            msd_disabled: false,
+                        },
+
+                        hal::reboot::RebootArch::Normal,
+                    );
+                }
+
+                _ => {
+                    println!(ctx, "Invalid command: {}", command);
+                }
+            }
+        }
+    }
+
     // UART Serial
     #[task(shared=[uart0], priority = 2)]
-    async fn telemetry(mut ctx: telemetry::Context) {
+    async fn telemetry(mut _ctx: telemetry::Context) {
         loop {
-            ctx.shared.uart0.lock(|uart0|{
-                    uart0.write_full_blocking(b"RTIC Yeet\n");
-                }
-            );
             Mono::delay(100.millis()).await;
         }
     }
