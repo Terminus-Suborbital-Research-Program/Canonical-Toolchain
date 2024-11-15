@@ -5,7 +5,7 @@ use rtic_sync::channel::Sender;
 // Max number of lines to buffer in the USB console
 pub const MAX_USB_LINES: usize = 5;
 // Default length of buffer strings used
-pub const HEAPLESS_STRING_ALLOC_LENGTH: usize = 64;
+pub const HEAPLESS_STRING_ALLOC_LENGTH: usize = 128;
 // Typedef for heapless string
 pub type HeaplessString = String<HEAPLESS_STRING_ALLOC_LENGTH>;
 
