@@ -227,8 +227,13 @@ mod app {
                                         serial.write_all("\r\n".as_bytes()).ok();
                                     }
 
-                                    // Append to buffer
-                                    command_buffer.push(c).ok();
+                                    if c == '\x08' || c == '\x7F' {
+                                        command_buffer.pop();
+                                        serial.write_all("\x08 \x08".as_bytes()).ok();
+                                    } else {
+                                        // Append to buffer
+                                        command_buffer.push(c).ok();
+                                    }
                                 }
                             }
 
@@ -300,11 +305,11 @@ mod app {
                     );
                 }
 
-                "hc12-selftest" => {
+                "hc-selftest" => {
                     hc12_selftest::spawn().ok();
                 }
 
-                "hc12-set-channel" => {
+                "hc-set-channel" => {
                     // Try to get channel, or inform user of error
                     let value = parts.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
 
@@ -339,7 +344,7 @@ mod app {
                     });
                 }
 
-                "hc12-set-power" => {
+                "hc-set-power" => {
                     // Try to get power, or inform user of error
                     let value = parts.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
 
@@ -374,7 +379,7 @@ mod app {
                     });
                 }
 
-                "hc12-set-baudrate" => {
+                "hc-set-baudrate" => {
                     // Try to get baudrate, or inform user of error
                     let value = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
 
@@ -417,6 +422,21 @@ mod app {
                     });
                 }
 
+                "hc12-send-test" => {
+                    // Send a test string
+                    ctx.shared.hc12.lock(|hc12| {
+                        hc12.write(b"Hello, World!\n").unwrap();
+                    });
+                }
+
+                "hc12-any-chars-avail" => {
+                    // Check if any characters are available
+                    ctx.shared.hc12.lock(|hc12| {
+                        let available: bool = hc12.read_ready().unwrap();
+                        println!(ctx, "Characters Available: {}", available);
+                    });
+                }
+
                 "sp" => {
                     // Print the stack pointer
                     println!(ctx, "Stack Pointer: 0x{:08X}", utilities::get_stack_pointer());
@@ -427,113 +447,6 @@ mod app {
                 }
             }
         }
-    }
-
-    #[task(shared = [serial_console_writer, hc12], priority = 2)]
-    async fn hc12_rangetest_sender(mut ctx: hc12_rangetest_sender::Context) {
-        let mut sequence_number: u8 = 0;
-        // Send 's' to start handshake
-        ctx.shared.hc12.lock(|hc12| {
-            hc12.write(b"s").unwrap();
-        });
-
-        let mut received_yet = false;
-        while !received_yet {
-            ctx.shared.hc12.lock(|hc12| {
-                if hc12.read_ready().is_ok() {
-                    let mut buffer = [0u8; 1];
-                    hc12.read(&mut buffer).unwrap();
-
-                    if buffer[0] == b'r' {
-                        received_yet = true;
-                    }
-                }
-            });
-
-            Mono::delay(100.nanos()).await;
-        }
-
-        // Send 1kB of data, pausing every 16 bytes to flush the buffer
-        let mut data = [0u8; 1024];
-        for i in 0..1024 {
-            data[i] = sequence_number;
-            sequence_number += 1;
-
-            if i % 16 == 0 {
-                ctx.shared.hc12.lock(|hc12| {
-                    hc12.flush().unwrap();
-                });
-
-                Mono::delay(100.nanos()).await;
-            }
-
-            ctx.shared.hc12.lock(|hc12| {
-                hc12.write(&[data[i]]).unwrap();
-            });
-        }
-
-        // Send 'e' to end the handshake
-        ctx.shared.hc12.lock(|hc12| {
-            hc12.write(b"e").unwrap();
-        });
-
-        // 1kB of data
-    }
-
-    // The receiver for the above test, is meant to be run on a different device
-    // Reports the number of bytes received
-    #[task(shared = [serial_console_writer, hc12], priority = 2)]
-    async fn hc12_rangetest_receiver(mut ctx: hc12_rangetest_receiver::Context) {
-        let mut sequence_number: u8 = 0;
-        let mut received_data = [0u8; 1024];
-        let mut received_yet = false;
-        let mut received_bytes = 0;
-
-        while !received_yet {
-            ctx.shared.hc12.lock(|hc12| {
-                if hc12.read_ready().is_ok() {
-                    let mut buffer = [0u8; 1];
-                    hc12.read(&mut buffer).unwrap();
-
-                    if buffer[0] == b's' {
-                        received_yet = true;
-                    }
-                }
-            });
-
-            Mono::delay(100.nanos()).await;
-        }
-
-        // Send 'r' to start the handshake
-        ctx.shared.hc12.lock(|hc12| {
-            hc12.write(b"r").unwrap();
-        });
-
-        // Receive 1kB of data
-        while received_bytes < 1024 {
-            ctx.shared.hc12.lock(|hc12| {
-                if hc12.read_ready().is_ok() {
-                    let mut buffer = [0u8; 1];
-                    hc12.read(&mut buffer).unwrap();
-
-                    if buffer[0] == sequence_number {
-                        received_data[received_bytes] = sequence_number;
-                        received_bytes += 1;
-                        sequence_number += 1;
-                    }
-                }
-            });
-
-            Mono::delay(100.nanos()).await;
-        }
-
-        // Send 'e' to end the handshake
-        ctx.shared.hc12.lock(|hc12| {
-            hc12.write(b"e").unwrap();
-        });
-
-        println!(ctx, "Received {} bytes", received_bytes);
-        println!(ctx, "Drop rate: {}%", (1024 - received_bytes) as f32 / 1024.0 * 100.0);
     }
 
     #[task(shared = [serial_console_writer, hc12], priority = 2)]
@@ -580,6 +493,13 @@ mod app {
             // Move back to normal mode
             println!(ctx, "Exiting Configuration Mode...");
             hc12.set_mode(hc12::HC12Mode::Normal).unwrap();
+        });
+
+        // Delay for 100ms and clear the buffer
+        Mono::delay(100.millis()).await;
+
+        ctx.shared.hc12.lock(|hc12| {
+            hc12.clear().unwrap();
         });
     }
 }
