@@ -10,14 +10,14 @@ pub const HEAPLESS_STRING_ALLOC_LENGTH: usize = 128;
 pub type HeaplessString = String<HEAPLESS_STRING_ALLOC_LENGTH>;
 
 pub struct SerialWriter {
-    sender: Sender<'static, heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>,
+    sender: Sender<'static, heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>,
 }
 
 impl SerialWriter {
-    pub fn new(sender: Sender<'static, heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>) -> Self {
-        SerialWriter {
-            sender,
-        }
+    pub fn new(
+        sender: Sender<'static, heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>,
+    ) -> Self {
+        SerialWriter { sender }
     }
 }
 

@@ -1,6 +1,6 @@
 use core::fmt::{self, Write as FmtWrite};
-use embedded_io::{Read, ReadReady, Write, WriteReady};
 use embedded_hal::digital::OutputPin;
+use embedded_io::{Read, ReadReady, Write, WriteReady};
 use heapless::Deque;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +102,7 @@ impl<Uart, ConfigPin> HC12<Uart, ConfigPin> {
 impl<Uart, ConfigPin> HC12<Uart, ConfigPin>
 where
     Uart: Read + Write + ReadReady + WriteReady,
-    ConfigPin: OutputPin
+    ConfigPin: OutputPin,
 {
     pub fn new(uart: Uart, mut config_pin: ConfigPin) -> Result<Self, HC12Error> {
         // Set the HC12 module to normal mode
@@ -260,7 +260,7 @@ where
 impl<Uart, ConfigPin> FmtWrite for HC12<Uart, ConfigPin>
 where
     Uart: Read + Write + ReadReady + WriteReady,
-    ConfigPin: OutputPin
+    ConfigPin: OutputPin,
 {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         match self.write_str(s) {

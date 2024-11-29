@@ -33,20 +33,18 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
 )]
 mod app {
     use super::*;
-    use canonical_toolchain::{println, print};
+    use canonical_toolchain::{print, println};
     use embedded_hal::digital::{OutputPin, StatefulOutputPin};
     use embedded_io::{Read, ReadReady};
+    use fugit::RateExtU32;
     use hal::{
-        gpio::{
-            self, FunctionSio, PullNone, SioOutput
-        }, 
+        gpio::{self, FunctionSio, PullNone, SioOutput},
         sio::Sio,
     };
-    use fugit::RateExtU32;
     use rp235x_hal::{
-        clocks::init_clocks_and_plls, uart::{
-            DataBits, StopBits, UartConfig, UartPeripheral, 
-        }, Clock, Watchdog
+        clocks::init_clocks_and_plls,
+        uart::{DataBits, StopBits, UartConfig, UartPeripheral},
+        Clock, Watchdog,
     };
     const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
@@ -56,23 +54,23 @@ mod app {
     use hc12::{BaudRate, HC12};
 
     use rtic_sync::{
-        channel::{
-            Receiver,
-            Sender,
-        },
+        channel::{Receiver, Sender},
         make_channel,
     };
 
     pub type GPIO2 = gpio::Pin<hal::gpio::bank0::Gpio2, gpio::FunctionSioOutput, gpio::PullDown>;
-    pub type UARTBus = UartPeripheral<rp235x_hal::uart::Enabled, rp235x_hal::pac::UART0, (gpio::Pin<gpio::bank0::Gpio0, gpio::FunctionUart, gpio::PullDown>, gpio::Pin<gpio::bank0::Gpio1, gpio::FunctionUart, gpio::PullDown>)>;
+    pub type UARTBus = UartPeripheral<
+        rp235x_hal::uart::Enabled,
+        rp235x_hal::pac::UART0,
+        (
+            gpio::Pin<gpio::bank0::Gpio0, gpio::FunctionUart, gpio::PullDown>,
+            gpio::Pin<gpio::bank0::Gpio1, gpio::FunctionUart, gpio::PullDown>,
+        ),
+    >;
 
     static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
 
-    use serial_handler::{
-        MAX_USB_LINES,
-        HEAPLESS_STRING_ALLOC_LENGTH,
-        HeaplessString,
-    };
+    use serial_handler::{HeaplessString, HEAPLESS_STRING_ALLOC_LENGTH, MAX_USB_LINES};
 
     #[shared]
     struct Shared {
@@ -84,7 +82,7 @@ mod app {
 
     #[local]
     struct Local {
-        led: gpio::Pin<gpio::bank0::Gpio25, FunctionSio<SioOutput>, PullNone>
+        led: gpio::Pin<gpio::bank0::Gpio25, FunctionSio<SioOutput>, PullNone>,
     }
 
     #[init]
@@ -95,10 +93,12 @@ mod app {
         }
 
         // Channel for sending strings to the USB console
-        let (usb_console_line_sender,usb_console_line_receiver) = make_channel!(HeaplessString, MAX_USB_LINES);
-        
+        let (usb_console_line_sender, usb_console_line_receiver) =
+            make_channel!(HeaplessString, MAX_USB_LINES);
+
         // Channel for incoming commands from the USB console
-        let (usb_console_command_sender, usb_console_command_receiver) = make_channel!(HeaplessString, MAX_USB_LINES);
+        let (usb_console_command_sender, usb_console_command_receiver) =
+            make_channel!(HeaplessString, MAX_USB_LINES);
 
         // Set up clocks
         let mut watchdog = Watchdog::new(ctx.device.WATCHDOG);
@@ -110,7 +110,9 @@ mod app {
             ctx.device.PLL_USB,
             &mut ctx.device.RESETS,
             &mut watchdog,
-        ).ok().unwrap();
+        )
+        .ok()
+        .unwrap();
 
         Mono::start(ctx.device.TIMER0, &ctx.device.RESETS);
 
@@ -126,17 +128,23 @@ mod app {
         );
 
         // Configure GPIO25 as an output
-        let mut led_pin = pins.gpio25.into_pull_type::<PullNone>().into_push_pull_output();
+        let mut led_pin = pins
+            .gpio25
+            .into_pull_type::<PullNone>()
+            .into_push_pull_output();
         led_pin.set_low().unwrap();
         // Start the heartbeat task
         heartbeat::spawn().ok();
 
         // Pin setup for UART
-        let uart_pins =  (pins.gpio0.into_function(), pins.gpio1.into_function());
-        let mut uart_peripheral = UartPeripheral::new(ctx.device.UART0, uart_pins, &mut ctx.device.RESETS).enable(
-            UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
-            clocks.peripheral_clock.freq()
-        ).unwrap();
+        let uart_pins = (pins.gpio0.into_function(), pins.gpio1.into_function());
+        let mut uart_peripheral =
+            UartPeripheral::new(ctx.device.UART0, uart_pins, &mut ctx.device.RESETS)
+                .enable(
+                    UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
+                    clocks.peripheral_clock.freq(),
+                )
+                .unwrap();
         uart_peripheral.enable_rx_interrupt();
 
         // Use pin 4 (GPIO2) as the HC12 configuration pin
@@ -145,18 +153,16 @@ mod app {
 
         // Set up USB Device allocator
         let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
-            ctx.device.USB, 
-            ctx.device.USB_DPRAM, 
-            clocks.usb_clock, 
+            ctx.device.USB,
+            ctx.device.USB_DPRAM,
+            clocks.usb_clock,
             true,
-            &mut ctx.device.RESETS 
+            &mut ctx.device.RESETS,
         ));
         unsafe {
             USB_BUS = Some(usb_bus);
         }
-        let usb_bus_ref = unsafe {
-            USB_BUS.as_ref().unwrap()
-        };
+        let usb_bus_ref = unsafe { USB_BUS.as_ref().unwrap() };
 
         let serial = SerialPort::new(usb_bus_ref);
         let usb_dev = UsbDeviceBuilder::new(usb_bus_ref, UsbVidPid(0x16c0, 0x27dd))
@@ -182,9 +188,7 @@ mod app {
                 usb_serial: serial,
                 serial_console_writer,
             },
-            Local {
-                led: led_pin
-            }
+            Local { led: led_pin },
         )
     }
 
@@ -199,7 +203,14 @@ mod app {
     }
 
     #[task(priority = 3, shared = [usb_device, usb_serial, serial_console_writer])]
-    async fn usb_console_reader(mut ctx: usb_console_reader::Context, mut command_sender: Sender<'static, heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>) {
+    async fn usb_console_reader(
+        mut ctx: usb_console_reader::Context,
+        mut command_sender: Sender<
+            'static,
+            heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>,
+            MAX_USB_LINES,
+        >,
+    ) {
         let mut buf = [0u8; 64];
         let mut command_buffer = heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>::new();
 
@@ -258,21 +269,28 @@ mod app {
     }
 
     #[task(priority = 3, shared = [usb_device, usb_serial])]
-    async fn usb_serial_console_printer(mut ctx: usb_serial_console_printer::Context, mut reciever: Receiver<'static, heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>) {
+    async fn usb_serial_console_printer(
+        mut ctx: usb_serial_console_printer::Context,
+        mut reciever: Receiver<
+            'static,
+            heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>,
+            MAX_USB_LINES,
+        >,
+    ) {
         while let Ok(mut line) = reciever.recv().await {
             // If the line ends with a newline, pop it off, and then add a \r\n
             if line.ends_with('\n') {
                 line.pop();
                 line.push_str("\r\n").ok();
             }
-            
+
             ctx.shared.usb_device.lock(|_usb_dev| {
                 ctx.shared.usb_serial.lock(|serial| {
                     let mut wr_ptr = line.as_bytes();
                     while !wr_ptr.is_empty() {
                         match serial.write(wr_ptr) {
                             Ok(len) => wr_ptr = &wr_ptr[len..],
-                            Err(_) => break
+                            Err(_) => break,
                         }
                     }
                 })
@@ -282,7 +300,14 @@ mod app {
 
     // Command Handler
     #[task(shared=[serial_console_writer, hc12], priority = 2)]
-    async fn command_handler(mut ctx: command_handler::Context, mut reciever: Receiver<'static, heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>, MAX_USB_LINES>) {
+    async fn command_handler(
+        mut ctx: command_handler::Context,
+        mut reciever: Receiver<
+            'static,
+            heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>,
+            MAX_USB_LINES,
+        >,
+    ) {
         while let Ok(line) = reciever.recv().await {
             // Split into commands and arguments, on whitespace
             let mut parts = line.split_whitespace();
@@ -300,7 +325,6 @@ mod app {
                             picoboot_disabled: false,
                             msd_disabled: false,
                         },
-
                         hal::reboot::RebootArch::Normal,
                     );
                 }
@@ -381,7 +405,11 @@ mod app {
 
                 "sp" => {
                     // Print the stack pointer
-                    println!(ctx, "Stack Pointer: 0x{:08X}", utilities::get_stack_pointer());
+                    println!(
+                        ctx,
+                        "Stack Pointer: 0x{:08X}",
+                        utilities::get_stack_pointer()
+                    );
                 }
 
                 _ => {
@@ -405,15 +433,13 @@ mod app {
 
         Mono::delay(1000.millis()).await;
 
-        ctx.shared.hc12.lock(|hc12| {
-            match hc12.check_at() {
-                Err(e) => {
-                    println!(ctx, "Error checking AT: {:?}", e);
-                }
+        ctx.shared.hc12.lock(|hc12| match hc12.check_at() {
+            Err(e) => {
+                println!(ctx, "Error checking AT: {:?}", e);
+            }
 
-                Ok(_) => {
-                    println!(ctx, "AT Check Successful, waiting for response...");
-                }
+            Ok(_) => {
+                println!(ctx, "AT Check Successful, waiting for response...");
             }
         });
 
