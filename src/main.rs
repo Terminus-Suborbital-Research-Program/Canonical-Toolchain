@@ -5,7 +5,6 @@
 mod hc12;
 mod serial_handler;
 mod utilities;
-mod primitives;
 
 use panic_halt as _;
 
