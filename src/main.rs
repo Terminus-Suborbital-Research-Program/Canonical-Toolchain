@@ -2,6 +2,10 @@
 #![no_std]
 #![no_main]
 
+mod hc12;
+mod serial_handler;
+mod utilities;
+
 use panic_halt as _;
 
 #[cfg(all(feature = "rp2040"))]
@@ -25,45 +29,60 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
 
 #[rtic::app(
     device = hal::pac,
-    dispatchers = [PIO2_IRQ_0, PIO2_IRQ_1],
+    dispatchers = [PIO2_IRQ_0, PIO2_IRQ_1, DMA_IRQ_0],
 )]
 mod app {
     use super::*;
+    use canonical_toolchain::{print, println};
     use embedded_hal::digital::{OutputPin, StatefulOutputPin};
+    use embedded_io::{Read, ReadReady};
+    use fugit::RateExtU32;
     use hal::{
-        gpio::{
-            self, bank0::{Gpio25, Gpio17, Gpio16}, FunctionSio, PullNone, SioOutput
-        }, 
+        gpio::{self, FunctionSio, PullNone, SioOutput},
         sio::Sio,
     };
-    use fugit::RateExtU32;
     use rp235x_hal::{
-        clocks::init_clocks_and_plls, 
-        uart::{
-            DataBits, StopBits, UartConfig, UartPeripheral, 
-        },
-        Clock, 
-        Watchdog
+        clocks::init_clocks_and_plls,
+        uart::{DataBits, StopBits, UartConfig, UartPeripheral},
+        Clock, Watchdog,
     };
     const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
     use usb_device::{class_prelude::*, prelude::*};
-    use usbd_serial::SerialPort;
+    use usbd_serial::{embedded_io::Write, SerialPort};
 
-    type UARTBus = UartPeripheral<rp235x_hal::uart::Enabled, rp235x_hal::pac::UART0, (gpio::Pin<Gpio16, gpio::FunctionUart, gpio::PullDown>, gpio::Pin<Gpio17, gpio::FunctionUart, gpio::PullDown>)>;
+    use hc12::{BaudRate, HC12};
+
+    use rtic_sync::{
+        channel::{Receiver, Sender},
+        make_channel,
+    };
+
+    pub type GPIO2 = gpio::Pin<hal::gpio::bank0::Gpio2, gpio::FunctionSioOutput, gpio::PullDown>;
+    pub type UARTBus = UartPeripheral<
+        rp235x_hal::uart::Enabled,
+        rp235x_hal::pac::UART0,
+        (
+            gpio::Pin<gpio::bank0::Gpio0, gpio::FunctionUart, gpio::PullDown>,
+            gpio::Pin<gpio::bank0::Gpio1, gpio::FunctionUart, gpio::PullDown>,
+        ),
+    >;
 
     static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
 
+    use serial_handler::{HeaplessString, HEAPLESS_STRING_ALLOC_LENGTH, MAX_USB_LINES};
+
     #[shared]
-    struct Shared<'a> {
-        uart0: UARTBus,
+    struct Shared {
+        hc12: HC12<UARTBus, GPIO2>,
         usb_serial: SerialPort<'static, hal::usb::UsbBus>,
-        usb_device: UsbDevice<'static, hal::usb::UsbBus>
+        usb_device: UsbDevice<'static, hal::usb::UsbBus>,
+        serial_console_writer: serial_handler::SerialWriter,
     }
 
     #[local]
     struct Local {
-        led: gpio::Pin<Gpio25, FunctionSio<SioOutput>, PullNone>
+        led: gpio::Pin<gpio::bank0::Gpio25, FunctionSio<SioOutput>, PullNone>,
     }
 
     #[init]
@@ -72,6 +91,14 @@ mod app {
         unsafe {
             hal::sio::spinlock_reset();
         }
+
+        // Channel for sending strings to the USB console
+        let (usb_console_line_sender, usb_console_line_receiver) =
+            make_channel!(HeaplessString, MAX_USB_LINES);
+
+        // Channel for incoming commands from the USB console
+        let (usb_console_command_sender, usb_console_command_receiver) =
+            make_channel!(HeaplessString, MAX_USB_LINES);
 
         // Set up clocks
         let mut watchdog = Watchdog::new(ctx.device.WATCHDOG);
@@ -83,10 +110,11 @@ mod app {
             ctx.device.PLL_USB,
             &mut ctx.device.RESETS,
             &mut watchdog,
-        ).ok().unwrap();
+        )
+        .ok()
+        .unwrap();
 
         Mono::start(ctx.device.TIMER0, &ctx.device.RESETS);
-
 
         // The single-cycle I/O block controls our GPIO pins
         let sio = Sio::new(ctx.device.SIO);
@@ -99,34 +127,42 @@ mod app {
             &mut ctx.device.RESETS,
         );
 
-
         // Configure GPIO25 as an output
-        let mut led_pin = pins.gpio25.into_pull_type::<PullNone>().into_push_pull_output();
+        let mut led_pin = pins
+            .gpio25
+            .into_pull_type::<PullNone>()
+            .into_push_pull_output();
         led_pin.set_low().unwrap();
-
+        // Start the heartbeat task
         heartbeat::spawn().ok();
 
-        let uart_pins =  (pins.gpio16.into_function(), pins.gpio17.into_function());
-        let uart_peripheral = UartPeripheral::new(ctx.device.UART0, uart_pins, &mut ctx.device.RESETS).enable(
-            UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
-            clocks.peripheral_clock.freq()
-        ).unwrap();
-        uart_peripheral.write_full_blocking(b"UART Started.\n");
+        // Pin setup for UART
+        let uart_pins = (pins.gpio0.into_function(), pins.gpio1.into_function());
+        let mut uart_peripheral =
+            UartPeripheral::new(ctx.device.UART0, uart_pins, &mut ctx.device.RESETS)
+                .enable(
+                    UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
+                    clocks.peripheral_clock.freq(),
+                )
+                .unwrap();
+        uart_peripheral.enable_rx_interrupt();
+
+        // Use pin 4 (GPIO2) as the HC12 configuration pin
+        let hc12_configure_pin = pins.gpio2.into_push_pull_output();
+        let hc12 = HC12::new(uart_peripheral, hc12_configure_pin).unwrap();
 
         // Set up USB Device allocator
         let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
-            ctx.device.USB, 
-            ctx.device.USB_DPRAM, 
-            clocks.usb_clock, 
+            ctx.device.USB,
+            ctx.device.USB_DPRAM,
+            clocks.usb_clock,
             true,
-            &mut ctx.device.RESETS 
+            &mut ctx.device.RESETS,
         ));
         unsafe {
             USB_BUS = Some(usb_bus);
         }
-        let usb_bus_ref = unsafe {
-            USB_BUS.as_ref().unwrap()
-        };
+        let usb_bus_ref = unsafe { USB_BUS.as_ref().unwrap() };
 
         let serial = SerialPort::new(usb_bus_ref);
         let usb_dev = UsbDeviceBuilder::new(usb_bus_ref, UsbVidPid(0x16c0, 0x27dd))
@@ -138,18 +174,21 @@ mod app {
             .device_class(2)
             .build();
 
-        usb_serial_hello::spawn().ok();
-        telemetry::spawn().ok();
+        usb_serial_console_printer::spawn(usb_console_line_receiver).ok();
+        usb_console_reader::spawn(usb_console_command_sender).ok();
+        command_handler::spawn(usb_console_command_receiver).ok();
+
+        // Serial Writer Structure
+        let serial_console_writer = serial_handler::SerialWriter::new(usb_console_line_sender);
 
         (
             Shared {
-                uart0: uart_peripheral,
+                hc12,
                 usb_device: usb_dev,
-                usb_serial: serial
-            }, 
-            Local {
-                led: led_pin
-            }
+                usb_serial: serial,
+                serial_console_writer,
+            },
+            Local { led: led_pin },
         )
     }
 
@@ -163,55 +202,266 @@ mod app {
         }
     }
 
-    // USB Serial Echo
-    #[task(priority = 2, shared=[usb_device, usb_serial])]
-    async fn usb_serial_hello(mut ctx: usb_serial_hello::Context) {
-        // Set up usb device
+    #[task(priority = 3, shared = [usb_device, usb_serial, serial_console_writer])]
+    async fn usb_console_reader(
+        mut ctx: usb_console_reader::Context,
+        mut command_sender: Sender<
+            'static,
+            heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>,
+            MAX_USB_LINES,
+        >,
+    ) {
+        let mut buf = [0u8; 64];
+        let mut command_buffer = heapless::String::<HEAPLESS_STRING_ALLOC_LENGTH>::new();
+
+        let mut end_of_line = false;
+
         loop {
             ctx.shared.usb_device.lock(|usb_dev| {
-                ctx.shared.usb_serial.lock(|serial| {  
+                ctx.shared.usb_serial.lock(|serial| {
                     if usb_dev.poll(&mut [serial]) {
-                        let mut buf = [0u8; 64];
+                        // For the moment, we're just going to echo back the input, after a newline
                         match serial.read(&mut buf) {
-                            Ok(count) => {
-                                // Convert to upper
-                                buf.iter_mut().take(count).for_each(|b| {
-                                    b.make_ascii_uppercase();
-                                });
+                            Ok(count) if count > 0 => {
+                                // Collect buffer into an array
+                                let bytes = &buf[..count];
+                                for byte in bytes.iter() {
+                                    // Conv to char
+                                    let c = *byte as char;
 
-                                // Send back
-                                let mut wr_ptr = &buf[..count];
-                                while !wr_ptr.is_empty() {
-                                    match serial.write(wr_ptr) {
-                                        Ok(len) => wr_ptr = &wr_ptr[len..],
+                                    // Write to serial to echo
+                                    serial.write(&[*byte]).ok();
 
-                                        Err(_) => break,
+                                    // Detect eol
+                                    if c == '\r' || c == '\n' {
+                                        end_of_line = true;
+                                        serial.write_all("\r\n".as_bytes()).ok();
+                                    }
+
+                                    if c == '\x08' || c == '\x7F' {
+                                        command_buffer.pop();
+                                        serial.write_all("\x08 \x08".as_bytes()).ok();
+                                    } else {
+                                        // Append to buffer
+                                        command_buffer.push(c).ok();
                                     }
                                 }
                             }
 
-                            Err(_) => {
-
+                            _ => {
+                                // Ignore errors on read, assume it was just a desync
                             }
                         }
                     }
-                });
+                })
             });
 
-            Mono::delay(100.micros()).await;
+            if end_of_line {
+                end_of_line = false;
+                // Send the command to the command handler
+                command_sender.try_send(command_buffer.clone()).ok();
+                command_buffer.clear();
+            }
+
+            // Wait for a bit to poll again
+            Mono::delay(1000.micros()).await;
         }
-        
     }
 
-    // UART Serial
-    #[task(shared=[uart0], priority = 2)]
-    async fn telemetry(mut ctx: telemetry::Context) {
-        loop {
-            ctx.shared.uart0.lock(|uart0|{
-                    uart0.write_full_blocking(b"RTIC Yeet\n");
-                }
-            );
-            Mono::delay(100.millis()).await;
+    #[task(priority = 3, shared = [usb_device, usb_serial])]
+    async fn usb_serial_console_printer(
+        mut ctx: usb_serial_console_printer::Context,
+        mut reciever: Receiver<
+            'static,
+            heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>,
+            MAX_USB_LINES,
+        >,
+    ) {
+        while let Ok(mut line) = reciever.recv().await {
+            // If the line ends with a newline, pop it off, and then add a \r\n
+            if line.ends_with('\n') {
+                line.pop();
+                line.push_str("\r\n").ok();
+            }
+
+            ctx.shared.usb_device.lock(|_usb_dev| {
+                ctx.shared.usb_serial.lock(|serial| {
+                    let mut wr_ptr = line.as_bytes();
+                    while !wr_ptr.is_empty() {
+                        match serial.write(wr_ptr) {
+                            Ok(len) => wr_ptr = &wr_ptr[len..],
+                            Err(_) => break,
+                        }
+                    }
+                })
+            })
         }
+    }
+
+    // Command Handler
+    #[task(shared=[serial_console_writer, hc12], priority = 2)]
+    async fn command_handler(
+        mut ctx: command_handler::Context,
+        mut reciever: Receiver<
+            'static,
+            heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>,
+            MAX_USB_LINES,
+        >,
+    ) {
+        while let Ok(line) = reciever.recv().await {
+            // Split into commands and arguments, on whitespace
+            let mut parts = line.split_whitespace();
+
+            // Get the command
+            let command = parts.next().unwrap_or_default();
+
+            match command {
+                "usb-reboot" => {
+                    // Reboots to the USB bootloader interface
+                    println!(ctx, "Rebooting...");
+
+                    hal::reboot::reboot(
+                        hal::reboot::RebootKind::BootSel {
+                            picoboot_disabled: false,
+                            msd_disabled: false,
+                        },
+                        hal::reboot::RebootArch::Normal,
+                    );
+                }
+
+                "hc-selftest" => {
+                    hc12_selftest::spawn().ok();
+                }
+
+                "hc-set-channel" => {
+                    // Try to get channel, or inform user of error
+                    let value = parts.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+
+                    ctx.shared.hc12.lock(|hc12| {
+                        if hc12.set_mode(hc12::HC12Mode::Configuration).is_err() {
+                            println!(ctx, "Error entering configuration mode");
+                            return;
+                        }
+                    });
+
+                    // Delay for 100ms
+                    Mono::delay(100.millis()).await;
+
+                    ctx.shared.hc12.lock(|hc12| {
+                        println!(ctx, "Setting channel to: {}", value);
+                        match hc12.set_channel(value) {
+                            Ok(_) => {
+                                println!(ctx, "Channel set successfully!");
+                            }
+
+                            Err(e) => {
+                                println!(ctx, "Error setting channel: {:?}", e);
+                            }
+                        }
+                    });
+
+                    // Delay for 100ms and clear the buffer
+                    Mono::delay(100.millis()).await;
+
+                    ctx.shared.hc12.lock(|hc12| {
+                        hc12.clear();
+                    });
+                }
+
+                "hc-set-power" => {
+                    // Try to get power, or inform user of error
+                    let value = parts.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+
+                    ctx.shared.hc12.lock(|hc12| {
+                        if hc12.set_mode(hc12::HC12Mode::Configuration).is_err() {
+                            println!(ctx, "Error entering configuration mode");
+                            return;
+                        }
+                    });
+
+                    // Delay for 100ms
+                    Mono::delay(100.millis()).await;
+
+                    ctx.shared.hc12.lock(|hc12| {
+                        println!(ctx, "Setting power to: {}", value);
+                        match hc12.set_power(value) {
+                            Ok(_) => {
+                                println!(ctx, "Power set successfully!");
+                            }
+
+                            Err(e) => {
+                                println!(ctx, "Error setting power: {:?}", e);
+                            }
+                        }
+                    });
+
+                    // Delay for 100ms and clear the buffer
+                    Mono::delay(100.millis()).await;
+
+                    ctx.shared.hc12.lock(|hc12| {
+                        hc12.clear();
+                    });
+                }
+
+                "sp" => {
+                    // Print the stack pointer
+                    println!(
+                        ctx,
+                        "Stack Pointer: 0x{:08X}",
+                        utilities::get_stack_pointer()
+                    );
+                }
+
+                _ => {
+                    println!(ctx, "Invalid command: {}", command);
+                }
+            }
+        }
+    }
+
+    #[task(shared = [serial_console_writer, hc12], priority = 2)]
+    async fn hc12_selftest(mut ctx: hc12_selftest::Context) {
+        ctx.shared.hc12.lock(|hc12| {
+            println!(ctx, "Running HC12 Self Test...");
+
+            // Flush the incoming buffer
+            hc12.clear();
+
+            println!(ctx, "Entering Configuration Mode...");
+            hc12.set_mode(hc12::HC12Mode::Configuration).unwrap();
+        });
+
+        Mono::delay(1000.millis()).await;
+
+        ctx.shared.hc12.lock(|hc12| match hc12.check_at() {
+            Err(e) => {
+                println!(ctx, "Error checking AT: {:?}", e);
+            }
+
+            Ok(_) => {
+                println!(ctx, "AT Check Successful, waiting for response...");
+            }
+        });
+
+        Mono::delay(1000.millis()).await;
+
+        ctx.shared.hc12.lock(|hc12| {
+            match hc12.check_ok() {
+                true => {
+                    println!(ctx, "HC12 Self-Test Succeded!");
+                }
+
+                false => {
+                    println!(ctx, "Error: No OK Response Received!");
+                }
+            }
+
+            println!(ctx, "Exiting Configuration Mode...");
+            hc12.set_mode(hc12::HC12Mode::Normal).unwrap();
+
+            println!(ctx, "HC12 Self-Test Complete!");
+
+            hc12.clear();
+        });
     }
 }
