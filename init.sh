@@ -20,6 +20,12 @@ while getopts "sh" option; do
     esac
 done
 
+# Adds target via rustup
+rustup target add thumbv8m.main-none-eabihf
+
+# Installs Clippy
+rustup component add clippy
+
 # Cloning and building picotool
 echo "Cloning and building picotool..."
 
