@@ -1,7 +1,7 @@
 use core::fmt::{self, Write as FmtWrite};
-use embedded_io::{self as io, ErrorType};
+use embedded_io::{Read, ReadReady, Write, WriteReady};
 use embedded_hal::digital::OutputPin;
-use heapless::String;
+use heapless::Deque;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HC12Mode {
@@ -9,14 +9,9 @@ pub enum HC12Mode {
     Configuration,
 }
 
-pub struct HC12<Uart, ConfigPin> {
-    uart: Uart,
-    config_pin: ConfigPin,
-    mode: HC12Mode,
-}
-
 #[derive(Debug, Copy, Clone)]
 #[repr(u32)]
+#[allow(dead_code)]
 pub enum BaudRate {
     B1200 = 1200,
     B2400 = 2400,
@@ -28,13 +23,24 @@ pub enum BaudRate {
     B115200 = 115200,
 }
 
+#[derive(Debug)]
+pub enum HC12Error {
+    ConfigPinError,
+    BadBaudrate,
+    WriteError,
+    ReadError,
+    BufferFull,
+    BufferEmpty,
+}
+
+#[allow(dead_code)]
 impl BaudRate {
     pub fn to_u32(&self) -> u32 {
         *self as u32
     }
 
-    pub fn try_from_u32(value: u32) -> Result<Self, HC12Error<(), ()>> {
-        match value {
+    pub fn try_from_u32(baud: u32) -> Result<BaudRate, HC12Error> {
+        match baud {
             1200 => Ok(BaudRate::B1200),
             2400 => Ok(BaudRate::B2400),
             4800 => Ok(BaudRate::B4800),
@@ -64,232 +70,202 @@ impl fmt::Display for BaudRate {
     }
 }
 
-#[derive(Debug)]
-pub enum HC12Error<UartError, PinError> {
-    Uart(UartError),
-    Pin(PinError),
-    WrongMode,
-    BadBaudrate,
-    InvalidPower,
-    InvalidChannel,
-    CommandFailed,
-    BufferOverflow,
-    Timeout,
+pub struct HC12<Uart, ConfigPin> {
+    uart: Uart,
+    config_pin: ConfigPin,
+    mode: HC12Mode,
+    incoming_buffer: Deque<u8, 128>,
+    outgoing_buffer: Deque<u8, 128>,
 }
 
-impl<Uart, Pin> HC12<Uart, Pin>
-where
-    Uart: io::Read + io::Write + io::ReadReady + io::WriteReady,
-    Pin: OutputPin,
-{
-    pub fn new(uart: Uart, mut config_pin: Pin) -> Result<Self, HC12Error<Uart::Error, Pin::Error>> {
-        config_pin.set_high().map_err(HC12Error::Pin)?;
-
-        Ok(HC12 {
-            uart,
-            config_pin,
-            mode: HC12Mode::Normal,
-        })
+impl<Uart, ConfigPin> HC12<Uart, ConfigPin> {
+    pub fn bytes_available(&self) -> usize {
+        self.incoming_buffer.len()
     }
 
-    pub fn check_configuration_mode(&self) -> Result<(), HC12Error<Uart::Error, Pin::Error>> {
-        if self.mode == HC12Mode::Configuration {
-            Ok(())
-        } else {
-            Err(HC12Error::WrongMode)
+    // Cleares the incoming buffer
+    pub fn clear(&mut self) {
+        self.incoming_buffer.clear();
+    }
+
+    // Checks if the buffer contains "OK"
+    pub fn check_ok(&self) -> bool {
+        let cloned_buffer = self.incoming_buffer.clone();
+        let mut buffer = heapless::String::<128>::new();
+        for c in cloned_buffer {
+            buffer.push(c as char).unwrap();
+        }
+        buffer.contains("OK")
+    }
+}
+
+impl<Uart, ConfigPin> HC12<Uart, ConfigPin>
+where
+    Uart: Read + Write + ReadReady + WriteReady,
+    ConfigPin: OutputPin
+{
+    pub fn new(uart: Uart, mut config_pin: ConfigPin) -> Result<Self, HC12Error> {
+        // Set the HC12 module to normal mode
+        match config_pin.set_low() {
+            Ok(_) => Ok(HC12 {
+                uart,
+                config_pin,
+                mode: HC12Mode::Normal,
+                incoming_buffer: Deque::new(),
+                outgoing_buffer: Deque::new(),
+            }),
+
+            Err(_) => Err(HC12Error::ConfigPinError),
         }
     }
 
-    pub fn check_command_success(&mut self) -> Result<bool, HC12Error<Uart::Error, Pin::Error>> {
-        let mut buffer = [0u8; 2];
-        self.read_until(&mut buffer, 2, 100_000)?;
-
-        Ok(buffer == [b'O', b'K'])
+    // Write a character to the HC12 module's buffer
+    pub fn write_char(&mut self, c: u8) -> Result<(), HC12Error> {
+        match self.outgoing_buffer.push_back(c) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(HC12Error::BufferFull),
+        }
     }
 
-    fn read_until(
-        &mut self,
-        buffer: &mut [u8],
-        until: usize,
-        mut timeout: u32,
-    ) -> Result<usize, HC12Error<Uart::Error, Pin::Error>> {
-        let mut read = 0;
+    // Read a character from the HC12 module's buffer
+    pub fn read_char(&mut self) -> Result<u8, HC12Error> {
+        match self.incoming_buffer.pop_front() {
+            Some(c) => Ok(c),
+            None => Err(HC12Error::BufferEmpty),
+        }
+    }
 
-        while read < until && timeout > 0 {
-            if self.uart.read_ready().map_err(HC12Error::Uart)? {
-                let bytes_read = self.uart.read(&mut buffer[read..until]).map_err(HC12Error::Uart)?;
-                read += bytes_read;
-            } else {
-                timeout -= 1;
+    // Write a string to the HC12 module's buffer
+    pub fn write_str(&mut self, s: &str) -> Result<(), HC12Error> {
+        for c in s.bytes() {
+            match self.outgoing_buffer.push_back(c) {
+                Ok(_) => (),
+                Err(_) => return Err(HC12Error::BufferFull),
             }
         }
-
-        if read == until {
-            Ok(read)
-        } else {
-            Err(HC12Error::Timeout)
-        }
-    }
-
-    pub fn flush(&mut self) -> Result<(), HC12Error<Uart::Error, Pin::Error>> {
-        self.uart.flush().map_err(HC12Error::Uart)
-    }
-
-    pub fn clear(&mut self) -> Result<(), HC12Error<Uart::Error, Pin::Error>> {
-        while self.uart.read_ready().map_err(HC12Error::Uart)? {
-            let mut buffer = [0u8; 1];
-            self.uart.read(&mut buffer).map_err(HC12Error::Uart)?;
-        }
-
         Ok(())
     }
 
-    pub fn set_mode(&mut self, mode: HC12Mode) -> Result<(), HC12Error<Uart::Error, Pin::Error>> {
+    // Read a string from the HC12 module's buffer
+    pub fn read_str(&mut self) -> Result<heapless::String<128>, HC12Error> {
+        let mut s = heapless::String::new();
+        loop {
+            match self.incoming_buffer.pop_front() {
+                Some(c) => match s.push(c as char) {
+                    Ok(_) => (),
+                    Err(_) => return Err(HC12Error::BufferFull),
+                },
+                None => break,
+            }
+        }
+        Ok(s)
+    }
+
+    // Flush the outgoing buffer, making sure not to block
+    pub fn flush(&mut self) -> Result<(), HC12Error> {
+        while self.outgoing_buffer.len() > 0 {
+            if self.uart.write_ready().unwrap_or(false) {
+                match self.outgoing_buffer.pop_front() {
+                    Some(c) => match self.uart.write(&[c]) {
+                        Ok(_) => (),
+                        Err(_) => return Err(HC12Error::WriteError),
+                    },
+                    None => return Err(HC12Error::BufferEmpty),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // Update the incoming buffer, making sure not to block
+    pub fn update(&mut self) -> Result<(), HC12Error> {
+        while self.uart.read_ready().unwrap_or(false) {
+            let mut buf = [0];
+            match self.uart.read(&mut buf) {
+                Ok(_) => match self.incoming_buffer.push_back(buf[0]) {
+                    Ok(_) => (),
+                    Err(_) => return Err(HC12Error::BufferFull),
+                },
+                Err(_) => return Err(HC12Error::ReadError),
+            }
+        }
+        Ok(())
+    }
+
+    // Set the HC12 module to a mode
+    pub fn set_mode(&mut self, mode: HC12Mode) -> Result<(), HC12Error> {
         match mode {
-            HC12Mode::Normal => self.config_pin.set_high().map_err(HC12Error::Pin)?,
-            HC12Mode::Configuration => self.config_pin.set_low().map_err(HC12Error::Pin)?,
-        }
-
-        self.mode = mode;
-        Ok(())
-    }
-
-    pub fn set_baudrate(&mut self, baudrate: BaudRate) -> Result<(), HC12Error<Uart::Error, Pin::Error>> {
-        self.check_configuration_mode()?;
-
-        let mut command_string = String::<12>::new();
-        write!(command_string, "AT+B{}\n", baudrate).map_err(|_| HC12Error::BufferOverflow)?;
-
-        self.uart
-            .write_all(command_string.as_bytes())
-            .map_err(HC12Error::Uart)?;
-
-        if self.check_command_success()? {
-            Ok(())
-        } else {
-            Err(HC12Error::BadBaudrate)
+            HC12Mode::Normal => match self.config_pin.set_low() {
+                Ok(_) => {
+                    self.mode = HC12Mode::Normal;
+                    Ok(())
+                }
+                Err(_) => Err(HC12Error::ConfigPinError),
+            },
+            HC12Mode::Configuration => match self.config_pin.set_high() {
+                Ok(_) => {
+                    self.mode = HC12Mode::Configuration;
+                    Ok(())
+                }
+                Err(_) => Err(HC12Error::ConfigPinError),
+            },
         }
     }
 
-    pub fn set_power(&mut self, power: u8) -> Result<(), HC12Error<Uart::Error, Pin::Error>> {
-        self.check_configuration_mode()?;
-
-        if power == 0 || power > 8 {
-            return Err(HC12Error::InvalidPower);
+    // Sends an AT command to the HC12 module
+    // Errors if the HC12 module is not in configuration mode
+    // Prepends the AT+ prefix to the command, and appends a newline
+    pub fn send_at(&mut self, command: &str) -> Result<(), HC12Error> {
+        if self.mode == HC12Mode::Normal {
+            return Err(HC12Error::ConfigPinError);
         }
-
-        let mut command_string = String::<12>::new();
-        write!(command_string, "AT+P{}\n", power).map_err(|_| HC12Error::BufferOverflow)?;
-
-        self.uart
-            .write_all(command_string.as_bytes())
-            .map_err(HC12Error::Uart)?;
-
-        if self.check_command_success()? {
-            Ok(())
-        } else {
-            Err(HC12Error::CommandFailed)
-        }
+        self.write_str("AT+")?;
+        self.write_str(command)?;
+        self.write_str("\n")
     }
 
-    pub fn set_channel(&mut self, channel: u8) -> Result<(), HC12Error<Uart::Error, Pin::Error>> {
-        self.check_configuration_mode()?;
-
-        if channel == 0 || channel > 127 {
-            return Err(HC12Error::InvalidChannel);
+    // Sends a raw AT check command to the HC12 module
+    // Errors if the HC12 module is not in configuration mode
+    pub fn check_at(&mut self) -> Result<(), HC12Error> {
+        if self.mode == HC12Mode::Normal {
+            return Err(HC12Error::ConfigPinError);
         }
-
-        let mut command_string = String::<12>::new();
-        write!(command_string, "AT+C{:03}\n", channel).map_err(|_| HC12Error::BufferOverflow)?;
-
-        self.uart
-            .write_all(command_string.as_bytes())
-            .map_err(HC12Error::Uart)?;
-
-        if self.check_command_success()? {
-            Ok(())
-        } else {
-            Err(HC12Error::CommandFailed)
-        }
+        self.write_str("AT\n")
     }
 
-    pub fn get_mode(&self) -> HC12Mode {
-        self.mode
+    // Sets the channel of the HC12 module
+    pub fn set_channel(&mut self, channel: u8) -> Result<(), HC12Error> {
+        if channel > 127 {
+            return Err(HC12Error::BadBaudrate);
+        }
+        let mut channel_str = heapless::String::<10>::new();
+        write!(channel_str, "C{}", channel).unwrap();
+        self.send_at(&channel_str)
+    }
+
+    // Sets the power of the HC12 module
+    // Ranges from 1-8, inclusive
+    pub fn set_power(&mut self, power: u8) -> Result<(), HC12Error> {
+        if power < 1 || power > 8 {
+            return Err(HC12Error::BadBaudrate);
+        }
+        let mut power_str = heapless::String::<10>::new();
+        write!(power_str, "P{}", power).unwrap();
+        self.send_at(&power_str)
     }
 }
 
-// Implement embedded_io::Error for HC12Error
-impl<UartError, PinError> io::Error for HC12Error<UartError, PinError>
+// Impliment the Write trait for HC12 so we can use the write! macro
+// Uses the write_char method to write to the HC12 module's buffer
+impl<Uart, ConfigPin> FmtWrite for HC12<Uart, ConfigPin>
 where
-    UartError: fmt::Debug,
-    PinError: fmt::Debug,
+    Uart: Read + Write + ReadReady + WriteReady,
+    ConfigPin: OutputPin
 {
-    fn kind(&self) -> io::ErrorKind {
-        match self {
-            HC12Error::Uart(_) => io::ErrorKind::Other,
-            HC12Error::Pin(_) => io::ErrorKind::Other,
-            HC12Error::WrongMode => io::ErrorKind::InvalidInput,
-            HC12Error::BadBaudrate => io::ErrorKind::InvalidInput,
-            HC12Error::InvalidPower => io::ErrorKind::InvalidInput,
-            HC12Error::InvalidChannel => io::ErrorKind::InvalidInput,
-            HC12Error::CommandFailed => io::ErrorKind::Other,
-            HC12Error::BufferOverflow => io::ErrorKind::Other,
-            HC12Error::Timeout => io::ErrorKind::TimedOut,
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        match self.write_str(s) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(fmt::Error),
         }
-    }
-}
-
-// Implement embedded_io traits
-impl<Uart, Pin> ErrorType for HC12<Uart, Pin>
-where
-    Uart: io::Read + io::Write + io::ReadReady + io::WriteReady + ErrorType,
-    Pin: OutputPin,
-    Uart::Error: fmt::Debug,
-    Pin::Error: fmt::Debug,
-{
-    type Error = HC12Error<Uart::Error, Pin::Error>;
-}
-
-impl<Uart, Pin> io::Read for HC12<Uart, Pin>
-where
-    Uart: io::Read + io::Write + io::ReadReady + io::WriteReady,
-    Pin: OutputPin,
-{
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        self.uart.read(buf).map_err(HC12Error::Uart)
-    }
-}
-
-impl<Uart, Pin> io::Write for HC12<Uart, Pin>
-where
-    Uart: io::Read + io::Write + io::ReadReady + io::WriteReady,
-    Pin: OutputPin,
-{
-    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        self.uart.write(buf).map_err(HC12Error::Uart)
-    }
-
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        self.uart.flush().map_err(HC12Error::Uart)
-    }
-}
-
-impl<Uart, Pin> io::ReadReady for HC12<Uart, Pin>
-where
-    Uart: io::Read + io::Write + io::ReadReady + io::WriteReady,
-    Pin: OutputPin,
-{
-    fn read_ready(&mut self) -> Result<bool, Self::Error> {
-        self.uart.read_ready().map_err(HC12Error::Uart)
-    }
-}
-
-impl<Uart, Pin> io::WriteReady for HC12<Uart, Pin>
-where
-    Uart: io::Read + io::Write + io::ReadReady + io::WriteReady,
-    Pin: OutputPin,
-{
-    fn write_ready(&mut self) -> Result<bool, Self::Error> {
-        self.uart.write_ready().map_err(HC12Error::Uart)
     }
 }

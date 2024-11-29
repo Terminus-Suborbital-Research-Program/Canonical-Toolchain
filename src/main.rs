@@ -5,6 +5,7 @@
 mod hc12;
 mod serial_handler;
 mod utilities;
+mod primitives;
 
 use panic_halt as _;
 
@@ -340,7 +341,7 @@ mod app {
                     Mono::delay(100.millis()).await;
 
                     ctx.shared.hc12.lock(|hc12| {
-                        hc12.clear().unwrap();
+                        hc12.clear();
                     });
                 }
 
@@ -375,65 +376,7 @@ mod app {
                     Mono::delay(100.millis()).await;
 
                     ctx.shared.hc12.lock(|hc12| {
-                        hc12.clear().unwrap();
-                    });
-                }
-
-                "hc-set-baudrate" => {
-                    // Try to get baudrate, or inform user of error
-                    let value = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-
-                    let baudrate = match BaudRate::try_from_u32(value) {
-                        Ok(baudrate) => baudrate,
-                        Err(_) => {
-                            println!(ctx, "Invalid baudrate: {}", value);
-                            continue;
-                        }
-                    };
-
-                    ctx.shared.hc12.lock(|hc12| {
-                        if hc12.set_mode(hc12::HC12Mode::Configuration).is_err() {
-                            println!(ctx, "Error entering configuration mode");
-                            return;
-                        }
-                    });
-
-                    // Delay for 100ms
-                    Mono::delay(100.millis()).await;
-
-                    ctx.shared.hc12.lock(|hc12| {
-                        println!(ctx, "Setting baudrate to: {}", value);
-                        match hc12.set_baudrate(baudrate) {
-                            Ok(_) => {
-                                println!(ctx, "Baudrate set successfully!");
-                            }
-
-                            Err(e) => {
-                                println!(ctx, "Error setting baudrate: {:?}", e);
-                            }
-                        }
-                    });
-
-                    // Delay for 100ms and clear the buffer
-                    Mono::delay(100.millis()).await;
-
-                    ctx.shared.hc12.lock(|hc12| {
-                        hc12.clear().unwrap();
-                    });
-                }
-
-                "hc12-send-test" => {
-                    // Send a test string
-                    ctx.shared.hc12.lock(|hc12| {
-                        hc12.write(b"Hello, World!\n").unwrap();
-                    });
-                }
-
-                "hc12-any-chars-avail" => {
-                    // Check if any characters are available
-                    ctx.shared.hc12.lock(|hc12| {
-                        let available: bool = hc12.read_ready().unwrap();
-                        println!(ctx, "Characters Available: {}", available);
+                        hc12.clear();
                     });
                 }
 
@@ -455,7 +398,7 @@ mod app {
             println!(ctx, "Running HC12 Self Test...");
 
             // Flush the incoming buffer
-            hc12.clear().unwrap();
+            hc12.clear();
 
             println!(ctx, "Entering Configuration Mode...");
             hc12.set_mode(hc12::HC12Mode::Configuration).unwrap();
@@ -464,42 +407,36 @@ mod app {
         Mono::delay(1000.millis()).await;
 
         ctx.shared.hc12.lock(|hc12| {
-            println!(ctx, "Sending AT Command...");
+            match hc12.check_at() {
+                Err(e) => {
+                    println!(ctx, "Error checking AT: {:?}", e);
+                }
 
-            hc12.write(b"AT\n").unwrap();
+                Ok(_) => {
+                    println!(ctx, "AT Check Successful, waiting for response...");
+                }
+            }
         });
 
-        // Wait for three chars, let it have 100ms to do so
-        Mono::delay(100.millis()).await;
+        Mono::delay(1000.millis()).await;
 
         ctx.shared.hc12.lock(|hc12| {
-            let mut response = [0u8; 3];
-            let mut ptr = 0;
-            while hc12.read_ready().is_ok() {
-                let mut buf = [0u8; 1];
-                hc12.read(&mut buf).unwrap();
-                response[ptr] = buf[0];
-                ptr += 1;
+            match hc12.check_ok() {
+                true => {
+                    println!(ctx, "HC12 Self-Test Succeded!");
+                }
 
-                if ptr == 3 {
-                    break;
+                false => {
+                    println!(ctx, "Error: No OK Response Received!");
                 }
             }
 
-            // Should be "OK\n"
-            let response: HeaplessString = response.iter().map(|c| *c as char).collect();
-            println!(ctx, "Response: {}", response);
-
-            // Move back to normal mode
             println!(ctx, "Exiting Configuration Mode...");
             hc12.set_mode(hc12::HC12Mode::Normal).unwrap();
-        });
 
-        // Delay for 100ms and clear the buffer
-        Mono::delay(100.millis()).await;
+            println!(ctx, "HC12 Self-Test Complete!");
 
-        ctx.shared.hc12.lock(|hc12| {
-            hc12.clear().unwrap();
+            hc12.clear();
         });
     }
 }
