@@ -78,6 +78,7 @@ mod app {
         usb_serial: SerialPort<'static, hal::usb::UsbBus>,
         usb_device: UsbDevice<'static, hal::usb::UsbBus>,
         serial_console_writer: serial_handler::SerialWriter,
+        clock_freq_hz: u32,
     }
 
     #[local]
@@ -136,6 +137,9 @@ mod app {
         // Start the heartbeat task
         heartbeat::spawn().ok();
 
+        // Get clock frequency
+        let clock_freq = clocks.peripheral_clock.freq();
+
         // Pin setup for UART
         let uart_pins = (pins.gpio0.into_function(), pins.gpio1.into_function());
         let mut uart_peripheral =
@@ -145,7 +149,7 @@ mod app {
                     clocks.peripheral_clock.freq(),
                 )
                 .unwrap();
-        uart_peripheral.enable_rx_interrupt();
+        uart_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
 
         // Use pin 4 (GPIO2) as the HC12 configuration pin
         let hc12_configure_pin = pins.gpio2.into_push_pull_output();
@@ -187,6 +191,7 @@ mod app {
                 usb_device: usb_dev,
                 usb_serial: serial,
                 serial_console_writer,
+                clock_freq_hz: clock_freq.to_Hz(),
             },
             Local { led: led_pin },
         )
@@ -200,6 +205,14 @@ mod app {
 
             Mono::delay(500.millis()).await;
         }
+    }
+
+    // Updates the HC12 module on the serial interrupt
+    #[task(binds = UART0_IRQ, shared = [hc12])]
+    fn uart_interrupt(mut ctx: uart_interrupt::Context) {
+        ctx.shared.hc12.lock(|hc12| {
+            hc12.update().ok();
+        });
     }
 
     #[task(priority = 3, shared = [usb_device, usb_serial, serial_console_writer])]
@@ -299,7 +312,7 @@ mod app {
     }
 
     // Command Handler
-    #[task(shared=[serial_console_writer, hc12], priority = 2)]
+    #[task(shared=[serial_console_writer, hc12, clock_freq_hz], priority = 2)]
     async fn command_handler(
         mut ctx: command_handler::Context,
         mut reciever: Receiver<
@@ -331,6 +344,35 @@ mod app {
 
                 "hc-selftest" => {
                     hc12_selftest::spawn().ok();
+                }
+
+                // Sends all characters after the command to the HC12 module
+                "hc-send-string" => {
+                    // Get the string to send
+                    let string = parts.collect::<heapless::String<64>>();
+
+                    ctx.shared.hc12.lock(|hc12| {
+                        println!(ctx, "Writing string: {}", string);
+                        match hc12.write_str(&string) {
+                            Ok(_) => {
+                                println!(ctx, "String wrote successfully!");
+                            }
+
+                            Err(e) => {
+                                println!(ctx, "Error writing string: {:?}", e);
+                            }
+                        }
+
+                        match hc12.flush() {
+                            Ok(_) => {
+                                println!(ctx, "String flushed successfully!");
+                            }
+
+                            Err(e) => {
+                                println!(ctx, "Error flushing string: {:?}", e);
+                            }
+                        }
+                    });
                 }
 
                 "hc-set-channel" => {
@@ -365,6 +407,55 @@ mod app {
 
                     ctx.shared.hc12.lock(|hc12| {
                         hc12.clear();
+                    });
+                }
+
+                "clock-freq" => {
+                    // Print the current clock frequency
+                    ctx.shared.clock_freq_hz.lock(|freq| {
+                        println!(ctx, "Clock Frequency: {} Hz", freq);
+                    });
+                }
+
+                "hc-set-baudrate" => {
+                    // Get the baudrate and make sure it's valid
+                    let baudrate = parts
+                        .next()
+                        .and_then(|s| s.parse::<u32>().ok());
+
+                    let baudrate = match baudrate {
+                        Some(num) => {
+                            match BaudRate::from_u32(num) {
+                                Ok(rate) => rate,
+                                Err(_) => {
+                                    println!(ctx, "Invalid Baudrate: {}", num);
+                                    return;
+                                }
+                            }
+                        }
+
+                        None => {
+                            println!(ctx, "Bad String: {}", line);
+                            return;
+                        }
+                    };
+                    
+                    let mut freq = 0;
+                    ctx.shared.clock_freq_hz.lock(|clock_freq| {
+                        freq = *clock_freq;
+                    });
+
+                    // Set the baudrate
+                    ctx.shared.hc12.lock(|hc12| {
+                        match hc12.set_baudrate(baudrate, freq.Hz()) {
+                            Ok(_) => {
+                                println!(ctx, "Baudrate set successfully!");
+                            }
+
+                            Err(e) => {
+                                println!(ctx, "Error setting baudrate: {:?}", e);
+                            }
+                        }
                     });
                 }
 
@@ -428,7 +519,16 @@ mod app {
             hc12.clear();
 
             println!(ctx, "Entering Configuration Mode...");
-            hc12.set_mode(hc12::HC12Mode::Configuration).unwrap();
+            // hc12.set_mode(hc12::HC12Mode::Configuration).unwrap();
+            match hc12.set_mode(hc12::HC12Mode::Configuration) {
+                Ok(_) => {
+                    println!(ctx, "Entered Configuration Mode Successfully!");
+                }
+
+                Err(e) => {
+                    println!(ctx, "Error entering configuration mode: {:?}", e);
+                }
+            }
         });
 
         Mono::delay(1000.millis()).await;
@@ -448,7 +548,7 @@ mod app {
         ctx.shared.hc12.lock(|hc12| {
             match hc12.check_ok() {
                 true => {
-                    println!(ctx, "HC12 Self-Test Succeded!");
+                    println!(ctx, "OK ACK Received!");
                 }
 
                 false => {
