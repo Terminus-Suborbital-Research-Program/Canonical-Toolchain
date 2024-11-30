@@ -529,6 +529,26 @@ mod app {
                     );
                 }
 
+                "free" => {
+                    // Print the free heap size
+                    println!(ctx, "Free Heap: {} bytes", utilities::get_free_heap());
+                }
+
+                "malloc-test" => {
+                    // Allocates n bytes of memory, checks the free heap.
+                    // Since the memory should be freed automatically, the free heap should be the same as before
+                    // if we call "free" again
+                    let n = parts
+                        .next()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(0);
+
+                    let _vec = Vec::<u8>::with_capacity(n);
+                    println!(ctx, "Allocated {} bytes", n);
+
+                    println!(ctx, "Free Heap: {} bytes", utilities::get_free_heap());
+                }
+
                 _ => {
                     println!(ctx, "Invalid command: {}", command);
                 }
