@@ -31,7 +31,7 @@ usbd-serial = "0.2.2"
 embedded-time = "0.12.1"
 fugit = "0.3.7"
 # Allocator, when needed
-linked_list_allocator = "0.10.5"
+embedded-alloc = "0.6.0"
 
 # logging
 defmt = "0.3"

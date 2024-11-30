@@ -21,6 +21,15 @@ use rtic_monotonics::rp235x::prelude::*;
 #[cfg(feature = "rp2350")]
 rp235x_timer_monotonic!(Mono);
 
+// Heap Allocator
+use embedded_alloc::LlffHeap as Heap;
+
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
+
+// Allow allocated types without std
+extern crate alloc;
+
 /// Tell the Boot ROM about our application
 #[link_section = ".start_block"]
 #[used]
@@ -33,9 +42,9 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
 )]
 mod app {
     use super::*;
+    use alloc::vec::Vec;
     use canonical_toolchain::{print, println};
     use embedded_hal::digital::{OutputPin, StatefulOutputPin};
-    use embedded_io::{Read, ReadReady};
     use fugit::RateExtU32;
     use hal::{
         gpio::{self, FunctionSio, PullNone, SioOutput},
@@ -184,6 +193,23 @@ mod app {
 
         // Serial Writer Structure
         let serial_console_writer = serial_handler::SerialWriter::new(usb_console_line_sender);
+
+        // Initialize the heap
+        {
+            use core::mem::MaybeUninit;
+            const HEAP_SIZE: usize = 1024;
+            static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
+            unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
+        }
+
+        let mut test_vec: Vec<u8> = Vec::new();
+        test_vec.push(0x01);
+        test_vec.push(0x02);
+        test_vec.push(0x03);
+        
+        while test_vec.len() > 0 {
+            test_vec.pop();
+        }
 
         (
             Shared {
