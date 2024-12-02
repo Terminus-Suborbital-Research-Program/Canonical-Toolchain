@@ -1,5 +1,7 @@
 #![no_std]
 
+mod BME280;
+
 // Custom macro for printing to the serial console
 #[macro_export]
 macro_rules! println {
