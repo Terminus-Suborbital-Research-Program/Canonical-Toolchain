@@ -15,11 +15,11 @@ compile_error!("RP2040 Support Deprecated");
 #[cfg(feature = "rp2350")]
 use rp235x_hal as hal;
 
-// Monotonics
+// MonotonicTimertonics
 #[cfg(feature = "rp2350")]
 use rtic_monotonics::rp235x::prelude::*;
 #[cfg(feature = "rp2350")]
-rp235x_timer_monotonic!(Mono);
+rp235x_timer_monotonic!(MonotonicTimer);
 
 /// Tell the Boot ROM about our application
 #[link_section = ".start_block"]
@@ -35,7 +35,6 @@ mod app {
     use super::*;
     use canonical_toolchain::{print, println};
     use embedded_hal::digital::{OutputPin, StatefulOutputPin};
-    use embedded_io::{Read, ReadReady};
     use fugit::RateExtU32;
     use hal::{
         gpio::{self, FunctionSio, PullNone, SioOutput},
@@ -115,7 +114,7 @@ mod app {
         .ok()
         .unwrap();
 
-        Mono::start(ctx.device.TIMER0, &ctx.device.RESETS);
+        MonotonicTimer::start(ctx.device.TIMER0, &ctx.device.RESETS);
 
         // The single-cycle I/O block controls our GPIO pins
         let sio = Sio::new(ctx.device.SIO);
@@ -203,7 +202,7 @@ mod app {
         loop {
             _ = ctx.local.led.toggle();
 
-            Mono::delay(500.millis()).await;
+            MonotonicTimer::delay(500.millis()).await;
         }
     }
 
@@ -277,7 +276,7 @@ mod app {
             }
 
             // Wait for a bit to poll again
-            Mono::delay(1000.micros()).await;
+            MonotonicTimer::delay(1000.micros()).await;
         }
     }
 
@@ -349,7 +348,8 @@ mod app {
                 // Sends all characters after the command to the HC12 module
                 "hc-send-string" => {
                     // Get the string to send
-                    let string = parts.collect::<heapless::String<64>>();
+                    let mut string = parts.collect::<heapless::String<65>>();
+                    string.push('\n').ok();
 
                     ctx.shared.hc12.lock(|hc12| {
                         println!(ctx, "Writing string: {}", string);
@@ -387,7 +387,7 @@ mod app {
                     });
 
                     // Delay for 100ms
-                    Mono::delay(100.millis()).await;
+                    MonotonicTimer::delay(100.millis()).await;
 
                     ctx.shared.hc12.lock(|hc12| {
                         println!(ctx, "Setting channel to: {}", value);
@@ -403,7 +403,7 @@ mod app {
                     });
 
                     // Delay for 100ms and clear the buffer
-                    Mono::delay(100.millis()).await;
+                    MonotonicTimer::delay(100.millis()).await;
 
                     ctx.shared.hc12.lock(|hc12| {
                         hc12.clear();
@@ -471,7 +471,7 @@ mod app {
                     });
 
                     // Delay for 100ms
-                    Mono::delay(100.millis()).await;
+                    MonotonicTimer::delay(100.millis()).await;
 
                     ctx.shared.hc12.lock(|hc12| {
                         println!(ctx, "Setting power to: {}", value);
@@ -487,7 +487,7 @@ mod app {
                     });
 
                     // Delay for 100ms and clear the buffer
-                    Mono::delay(100.millis()).await;
+                    MonotonicTimer::delay(100.millis()).await;
 
                     ctx.shared.hc12.lock(|hc12| {
                         hc12.clear();
@@ -501,6 +501,53 @@ mod app {
                         "Stack Pointer: 0x{:08X}",
                         utilities::get_stack_pointer()
                     );
+                }
+
+
+                "rcv-line-test" => {
+                    let mut line_found = false;
+                    let mut first_char_recvd = false;
+                    let mut first_char_at = MonotonicTimer::now();
+                    let mut last_char_at = MonotonicTimer::now();
+                    let start_time = MonotonicTimer::now();
+                    let timed_out = 10_000.millis();
+                    let end_time = start_time + timed_out;
+
+                    while MonotonicTimer::now() < end_time && !line_found {
+                        ctx.shared.hc12.lock(|hc12| {
+                            let time = MonotonicTimer::now();
+                            if hc12.bytes_available() > 0 && !first_char_recvd {
+                                first_char_recvd = true;
+                                first_char_at = time;
+                            }
+                            last_char_at = time;
+
+                            if hc12.line_available() {
+                                line_found = true;
+                            }
+                        });
+
+                        MonotonicTimer::delay(100.millis()).await;
+                    }
+
+                    if line_found {
+                        println!(ctx, "Line Received!");
+                        let line = match ctx.shared.hc12.lock(|hc12| hc12.read_line()) {
+                            Ok(line) => line,
+                            Err(e) => {
+                                println!(ctx, "Error reading line: {:?}", e);
+                                return;
+                            }
+                        };
+                        let len = line.len();
+                        let time = last_char_at - first_char_at;
+
+                        println!(ctx, "Line: {}", line);
+                        println!(ctx, "Received {} bytes in {} ms", len, time.to_millis());
+                        println!(ctx, "Data Rate: {:.3} KBps", (len as f32 / time.to_millis() as f32));
+                    } else {
+                        println!(ctx, "Timed out!");
+                    }
                 }
 
                 _ => {
@@ -531,7 +578,7 @@ mod app {
             }
         });
 
-        Mono::delay(1000.millis()).await;
+        MonotonicTimer::delay(1000.millis()).await;
 
         ctx.shared.hc12.lock(|hc12| match hc12.check_at() {
             Err(e) => {
@@ -543,7 +590,7 @@ mod app {
             }
         });
 
-        Mono::delay(1000.millis()).await;
+        MonotonicTimer::delay(1000.millis()).await;
 
         ctx.shared.hc12.lock(|hc12| {
             match hc12.check_ok() {

@@ -116,19 +116,56 @@ impl<Uart, ConfigPin> HC12<Uart, ConfigPin> {
         self.incoming_buffer.len()
     }
 
-    // Cleares the incoming buffer
+    // Clears the incoming buffer
     pub fn clear(&mut self) {
         self.incoming_buffer.clear();
     }
 
-    // Checks if the buffer contains "OK"
-    pub fn check_ok(&self) -> bool {
+    // Returns true if the buffer has a given string in it
+    pub fn contains(&self, s: &str) -> bool {
         let cloned_buffer = self.incoming_buffer.clone();
         let mut buffer = heapless::String::<128>::new();
         for c in cloned_buffer {
             buffer.push(c as char).unwrap();
         }
-        buffer.contains("OK")
+        buffer.contains(s)
+    }
+
+    // Checks if the buffer contains "OK"
+    pub fn check_ok(&self) -> bool {
+        self.contains("OK")
+    }
+
+    // Peeks at the last character in the buffer
+    pub fn peek(&self) -> Result<u8, HC12Error> {
+        match self.incoming_buffer.back() {
+            Some(c) => Ok(*c),
+            None => Err(HC12Error::BufferEmpty),
+        }
+    }
+
+    // Returns true if the buffer contains a line ending
+    pub fn line_available(&self) -> bool {
+        self.contains("\n") || self.contains("\r")
+    }
+
+    // Reads a line from the buffer
+    pub fn read_line(&mut self) -> Result<heapless::String<128>, HC12Error> {
+        let mut s = heapless::String::new();
+        loop {
+            match self.incoming_buffer.pop_front() {
+                Some(c) => match s.push(c as char) {
+                    Ok(_) => {
+                        if c == b'\n' {
+                            break;
+                        }
+                    }
+                    Err(_) => return Err(HC12Error::BufferFull),
+                },
+                None => break,
+            }
+        }
+        Ok(s)
     }
 }
 
