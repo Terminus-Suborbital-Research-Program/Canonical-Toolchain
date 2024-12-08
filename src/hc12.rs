@@ -104,9 +104,10 @@ impl fmt::Display for BaudRate {
 #[allow(dead_code)]
 pub struct HC12<Uart, ConfigPin> {
     uart: Option<Uart>,
-    config_pin: ConfigPin,
+    pub config_pin: ConfigPin,
     mode: HC12Mode,
     baudrate: BaudRate,
+    last_baudrate: BaudRate,
     incoming_buffer: Deque<u8, 128>,
     outgoing_buffer: Deque<u8, 128>,
 }
@@ -151,6 +152,10 @@ impl<Uart, ConfigPin> HC12<Uart, ConfigPin> {
 
     // Reads a line from the buffer
     pub fn read_line(&mut self) -> Result<heapless::String<128>, HC12Error> {
+        if !self.contains("\n") {
+            return Err(HC12Error::BufferEmpty);
+        }
+
         let mut s = heapless::String::new();
         loop {
             match self.incoming_buffer.pop_front() {
@@ -225,6 +230,7 @@ where
                 config_pin,
                 mode: HC12Mode::Normal,
                 baudrate: BaudRate::B9600,
+                last_baudrate: BaudRate::B9600,
                 incoming_buffer: Deque::new(),
                 outgoing_buffer: Deque::new(),
             }),
@@ -322,16 +328,18 @@ where
     // Set the HC12 module to a mode
     pub fn set_mode(&mut self, mode: HC12Mode) -> Result<(), HC12Error> {
         match mode {
-            HC12Mode::Normal => match self.config_pin.set_low() {
+            HC12Mode::Normal => match self.config_pin.set_high() {
                 Ok(_) => {
                     self.mode = HC12Mode::Normal;
-                    Ok(())
+                    // If we go into normal mode, we need to set our uart baudrate back to what it was
+                    self.set_uart_baudrate(self.last_baudrate, CLOCK_FREQ.Hz())
                 }
                 Err(_) => Err(HC12Error::ConfigPinError),
             },
-            HC12Mode::Configuration => match self.config_pin.set_high() {
+            HC12Mode::Configuration => match self.config_pin.set_low() {
                 Ok(_) => {
                     // If we go into configuration mode, we need to set our uart baudrate to 9600
+                    self.last_baudrate = self.baudrate;
                     self.set_uart_baudrate(BaudRate::B9600, CLOCK_FREQ.Hz())?;
                     self.mode = HC12Mode::Configuration;
                     Ok(())
@@ -395,6 +403,12 @@ where
         let mut power_str = heapless::String::<10>::new();
         write!(power_str, "P{}", power).unwrap();
         self.send_at(&power_str)
+    }
+
+    // Gets the complete configuration of the module
+    pub fn parameters(&mut self) -> Result<(), HC12Error> {
+        self.send_at("RX")?;
+        Ok(())
     }
 }
 

@@ -57,7 +57,7 @@ mod app {
         make_channel,
     };
 
-    pub type GPIO2 = gpio::Pin<hal::gpio::bank0::Gpio2, gpio::FunctionSioOutput, gpio::PullDown>;
+    pub type GPIO3 = gpio::Pin<hal::gpio::bank0::Gpio3, gpio::FunctionSioOutput, gpio::PullNone>;
     pub type UARTBus = UartPeripheral<
         rp235x_hal::uart::Enabled,
         rp235x_hal::pac::UART0,
@@ -73,11 +73,12 @@ mod app {
 
     #[shared]
     struct Shared {
-        hc12: HC12<UARTBus, GPIO2>,
+        hc12: HC12<UARTBus, GPIO3>,
         usb_serial: SerialPort<'static, hal::usb::UsbBus>,
         usb_device: UsbDevice<'static, hal::usb::UsbBus>,
         serial_console_writer: serial_handler::SerialWriter,
         clock_freq_hz: u32,
+        echo_hc12: bool,
     }
 
     #[local]
@@ -151,7 +152,11 @@ mod app {
         uart_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
 
         // Use pin 4 (GPIO2) as the HC12 configuration pin
-        let hc12_configure_pin = pins.gpio2.into_push_pull_output();
+        let mut hc12_configure_pin = pins.gpio3
+            .into_pull_type::<PullNone>().into_push_pull_output();
+        hc12_configure_pin.set_high().unwrap();
+        hc12_configure_pin.set_drive_strength(gpio::OutputDriveStrength::TwelveMilliAmps);
+        
         let hc12 = HC12::new(uart_peripheral, hc12_configure_pin).unwrap();
 
         // Set up USB Device allocator
@@ -191,6 +196,7 @@ mod app {
                 usb_serial: serial,
                 serial_console_writer,
                 clock_freq_hz: clock_freq.to_Hz(),
+                echo_hc12: false,
             },
             Local { led: led_pin },
         )
@@ -311,7 +317,7 @@ mod app {
     }
 
     // Command Handler
-    #[task(shared=[serial_console_writer, hc12, clock_freq_hz], priority = 2)]
+    #[task(shared=[serial_console_writer, hc12, clock_freq_hz, echo_hc12], priority = 2)]
     async fn command_handler(
         mut ctx: command_handler::Context,
         mut reciever: Receiver<
@@ -345,8 +351,24 @@ mod app {
                     hc12_selftest::spawn().ok();
                 }
 
+                "echo" => {
+                    hc12_echo::spawn().ok();
+                }
+
+                "mode" => {
+                    ctx.shared.hc12.lock(|hc12| {
+                        let mode = hc12.config_pin.is_set_high().unwrap();
+                        let drive_strength = hc12.config_pin.get_drive_strength();
+                        let output_override = hc12.config_pin.get_output_override();
+
+                        println!(ctx, "Config pin is set high: {}", mode);
+                        println!(ctx, "Drive Strength: {:?}", drive_strength);
+                        println!(ctx, "Output Override: {:?}", output_override);
+                    });
+                }
+
                 // Sends all characters after the command to the HC12 module
-                "hc-send-string" => {
+                "hc-sendline" => {
                     // Get the string to send
                     let mut string = parts.collect::<heapless::String<65>>();
                     string.push('\n').ok();
@@ -379,13 +401,6 @@ mod app {
                     // Try to get channel, or inform user of error
                     let value = parts.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
 
-                    ctx.shared.hc12.lock(|hc12| {
-                        if hc12.set_mode(hc12::HC12Mode::Configuration).is_err() {
-                            println!(ctx, "Error entering configuration mode");
-                            return;
-                        }
-                    });
-
                     // Delay for 100ms
                     MonotonicTimer::delay(100.millis()).await;
 
@@ -414,6 +429,49 @@ mod app {
                     // Print the current clock frequency
                     ctx.shared.clock_freq_hz.lock(|freq| {
                         println!(ctx, "Clock Frequency: {} Hz", freq);
+                    });
+                }
+
+                "hc-mode" => {
+                    // config -> configuration mode
+                    // normal -> normal mode
+
+                    let mode = parts.next().unwrap_or_default();
+
+                    let mode = match mode {
+                        "config" => hc12::HC12Mode::Configuration,
+                        "normal" => hc12::HC12Mode::Normal,
+                        _ => {
+                            println!(ctx, "Invalid Mode: {}", mode);
+                            return;
+                        }
+                    };
+
+                    ctx.shared.hc12.lock(|hc12| {
+                        match hc12.set_mode(mode) {
+                            Ok(_) => {
+                                println!(ctx, "Mode set successfully!");
+                            }
+
+                            Err(e) => {
+                                println!(ctx, "Error setting mode: {:?}", e);
+                            }
+                        }
+                    });
+                }
+
+                "rx" => {
+                    // Gets parameters for the HC12 module
+                    ctx.shared.hc12.lock(|hc12| {
+                        let x = hc12.parameters();
+
+                        match x {
+                            Err(e) => {
+                                println!(ctx, "Error getting parameters: {:?}", e);
+                            }
+
+                            _ => {}
+                        }
                     });
                 }
 
@@ -457,21 +515,68 @@ mod app {
                             }
                         }
                     });
+
+                    // Delay for 100ms and clear the buffer
+                    MonotonicTimer::delay(100.millis()).await;
+
+                    ctx.shared.hc12.lock(|hc12| {
+                        hc12.clear();
+                    });
+                }
+
+                "sr" => {
+                    // Sends and receives a string, then prints the time taken to do so
+                    // 100 bytes
+                    let mut string = heapless::String::<100>::new();
+                    for i in 0..25 {
+                        string.push(((i % 10) as u8 + 48) as char).ok();
+                    }
+
+                    let start_time = MonotonicTimer::now();
+
+                    ctx.shared.hc12.lock(|hc12| {
+                        match hc12.write_str(&string) {
+                            Ok(_) => {
+                                println!(ctx, "String wrote successfully!");
+                            }
+
+                            Err(e) => {
+                                println!(ctx, "Error writing string: {:?}", e);
+                            }
+                        }
+
+                        match hc12.flush() {
+                            Ok(_) => {
+                                println!(ctx, "String flushed successfully!");
+                            }
+
+                            Err(e) => {
+                                println!(ctx, "Error flushing string: {:?}", e);
+                            }
+                        }
+                    });
+
+                    while ctx.shared.hc12.lock(|hc12| hc12.bytes_available()) < 100 {
+                        ctx.shared.hc12.lock(|hc12| {
+                            if hc12.bytes_available() > 25 {
+                                println!(ctx, "Bytes Available: {}", hc12.bytes_available());
+                            }
+                            hc12.update().ok();
+                        });
+                        MonotonicTimer::delay(100.nanos()).await;
+                    }
+
+                    let end_time = MonotonicTimer::now();
+
+                    let time = end_time - start_time;
+
+                    println!(ctx, "Sent/received 200 bytes in total in {} ms", time.to_millis());
+                    println!(ctx, "Data Rate: {:.3} KBps", (200.0 / time.to_millis() as f32));
                 }
 
                 "hc-set-power" => {
                     // Try to get power, or inform user of error
                     let value = parts.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
-
-                    ctx.shared.hc12.lock(|hc12| {
-                        if hc12.set_mode(hc12::HC12Mode::Configuration).is_err() {
-                            println!(ctx, "Error entering configuration mode");
-                            return;
-                        }
-                    });
-
-                    // Delay for 100ms
-                    MonotonicTimer::delay(100.millis()).await;
 
                     ctx.shared.hc12.lock(|hc12| {
                         println!(ctx, "Setting power to: {}", value);
@@ -487,7 +592,7 @@ mod app {
                     });
 
                     // Delay for 100ms and clear the buffer
-                    MonotonicTimer::delay(100.millis()).await;
+                    MonotonicTimer::delay(1000.millis()).await;
 
                     ctx.shared.hc12.lock(|hc12| {
                         hc12.clear();
@@ -504,7 +609,7 @@ mod app {
                 }
 
 
-                "rcv-line-test" => {
+                "line" => {
                     let mut line_found = false;
                     let mut first_char_recvd = false;
                     let mut first_char_at = MonotonicTimer::now();
@@ -550,10 +655,51 @@ mod app {
                     }
                 }
 
+                "readall" => {
+                    ctx.shared.hc12.lock(|hc12| {
+                        while let Ok(str) = hc12.read_line() {
+                            print!(ctx, "{}", str);
+                        }
+                    });
+                }
+
+                "firmware" => {
+                    ctx.shared.hc12.lock(|hc12| {
+                        hc12.send_at("V").ok();
+                    })
+                }
+
+                "default-config" => {
+                    ctx.shared.hc12.lock(|hc12| {
+                        hc12.set_mode(hc12::HC12Mode::Configuration).ok();
+                        let frequency = ctx.shared.clock_freq_hz.lock(|freq| *freq);
+                        hc12.set_baudrate(BaudRate::B9600, frequency.Hz()).ok();
+                        hc12.set_power(8).ok();
+                        hc12.set_channel(120).ok();
+                        hc12.set_mode(hc12::HC12Mode::Normal).ok();
+                    })
+                }
+
                 _ => {
                     println!(ctx, "Invalid command: {}", command);
                 }
             }
+        }
+    }
+
+    // Repeats lines back across the HC12 module when received, while running
+    #[task(shared = [hc12, echo_hc12, serial_console_writer], priority = 2)]
+    async fn hc12_echo(mut ctx: hc12_echo::Context) {
+        loop {
+            ctx.shared.hc12.lock(|hc12| {
+               if let Ok(line) = hc12.read_line() {
+                   hc12.write_str(&line).ok();
+                   println!(ctx, "Line: {}", line);
+                   hc12.flush().ok();
+               }
+            });
+
+            MonotonicTimer::delay(100.millis()).await;
         }
     }
 
@@ -566,7 +712,6 @@ mod app {
             hc12.clear();
 
             println!(ctx, "Entering Configuration Mode...");
-            // hc12.set_mode(hc12::HC12Mode::Configuration).unwrap();
             match hc12.set_mode(hc12::HC12Mode::Configuration) {
                 Ok(_) => {
                     println!(ctx, "Entered Configuration Mode Successfully!");
