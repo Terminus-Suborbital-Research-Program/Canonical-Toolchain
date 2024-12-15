@@ -19,17 +19,16 @@ OS:
 
 Extensions:
 - "Raspberry Pi Pico" VSCODE extension
-    -This should add the
 
 Dependencies:
 - LLvm tools (rustup component add llvm-tools-preview or sudo apt install llvm-tools-preview)
 - cargo-binutils ( cargo install cargo-binutils or sudo apt install cargo-binutils)
-- gdb-multiarch (udo apt install gdb-multiarch)
+- gdb-multiarch (sudo apt install gdb-multiarch)
 
 Project: 
 - Use the canonical toolchain (includes launch.json and tasks.json files to automate debugging commands)
 
-## Setup pt 1. Converting a rp240 pico into a debug probe:
+## Setup pt 1. Converting a rp2040 pico into a debug probe:
 
 
 1. Go to https://github.com/raspberrypi/debugprobe/releases
