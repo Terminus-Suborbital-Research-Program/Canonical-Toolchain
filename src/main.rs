@@ -2,9 +2,11 @@
 #![no_std]
 #![no_main]
 
-mod hc12;
-mod serial_handler;
-mod utilities;
+// Our Modules
+pub mod actuators;
+pub mod communications;
+pub mod sensors;
+pub mod utilities;
 
 use panic_halt as _;
 
@@ -33,6 +35,11 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
 )]
 mod app {
     use super::*;
+    use actuators::*;
+    use communications::*;
+    use sensors::*;
+    use utilities::*;
+
     use canonical_toolchain::{print, println};
     use embedded_hal::digital::{OutputPin, StatefulOutputPin};
     use embedded_io::{Read, ReadReady};
@@ -57,9 +64,9 @@ mod app {
         channel::{Receiver, Sender},
         make_channel,
     };
+    use serial_handler::{HeaplessString, HEAPLESS_STRING_ALLOC_LENGTH, MAX_USB_LINES};
 
-    pub type GPIO2 = gpio::Pin<hal::gpio::bank0::Gpio2, gpio::FunctionSioOutput, gpio::PullDown>;
-    pub type UARTBus = UartPeripheral<
+    pub type UART0Bus = UartPeripheral<
         rp235x_hal::uart::Enabled,
         rp235x_hal::pac::UART0,
         (
@@ -68,13 +75,24 @@ mod app {
         ),
     >;
 
+    pub type GPIO7 = gpio::Pin<hal::gpio::bank0::Gpio7, gpio::FunctionSioOutput, gpio::PullDown>;
+    pub type UART1Bus = UartPeripheral<
+        rp235x_hal::uart::Enabled,
+        rp235x_hal::pac::UART1,
+        (
+            gpio::Pin<gpio::bank0::Gpio8, gpio::FunctionUart, gpio::PullDown>,
+            gpio::Pin<gpio::bank0::Gpio9, gpio::FunctionUart, gpio::PullDown>,
+        ),
+    >;
+
     static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
 
-    use serial_handler::{HeaplessString, HEAPLESS_STRING_ALLOC_LENGTH, MAX_USB_LINES};
 
     #[shared]
     struct Shared {
-        hc12: HC12<UARTBus, GPIO2>,
+        uart0: UART0Bus,
+        uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>,
+        hc12: HC12<UART1Bus, GPIO7>,
         usb_serial: SerialPort<'static, hal::usb::UsbBus>,
         usb_device: UsbDevice<'static, hal::usb::UsbBus>,
         serial_console_writer: serial_handler::SerialWriter,
@@ -88,7 +106,7 @@ mod app {
 
     #[init]
     fn init(mut ctx: init::Context) -> (Shared, Local) {
-        // Reset the spinlocks - this is scipped by soft-reset
+        // Reset the spinlocks - this is skipped by soft-reset
         unsafe {
             hal::sio::spinlock_reset();
         }
@@ -121,7 +139,7 @@ mod app {
         let sio = Sio::new(ctx.device.SIO);
 
         // Set the pins to their default state
-        let pins = hal::gpio::Pins::new(
+        let bank0_pins = hal::gpio::Pins::new(
             ctx.device.IO_BANK0,
             ctx.device.PADS_BANK0,
             sio.gpio_bank0,
@@ -129,7 +147,7 @@ mod app {
         );
 
         // Configure GPIO25 as an output
-        let mut led_pin = pins
+        let mut led_pin = bank0_pins
             .gpio25
             .into_pull_type::<PullNone>()
             .into_push_pull_output();
@@ -140,20 +158,34 @@ mod app {
         // Get clock frequency
         let clock_freq = clocks.peripheral_clock.freq();
 
-        // Pin setup for UART
-        let uart_pins = (pins.gpio0.into_function(), pins.gpio1.into_function());
-        let mut uart_peripheral =
-            UartPeripheral::new(ctx.device.UART0, uart_pins, &mut ctx.device.RESETS)
+
+        // Pin setup for UART0
+        let uart0_pins = (bank0_pins.gpio0.into_function(), bank0_pins.gpio1.into_function());
+        let mut uart0_peripheral =
+            UartPeripheral::new(ctx.device.UART0, uart0_pins, &mut ctx.device.RESETS)
                 .enable(
                     UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
                     clocks.peripheral_clock.freq(),
                 )
                 .unwrap();
-        uart_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
+        uart0_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
+        let uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH> = heapless::String::new(); // Allocate uart0_buffer
+
+
+        // Pin setup for UART1
+        let uart1_pins = (bank0_pins.gpio8.into_function(), bank0_pins.gpio9.into_function());
+        let mut uart1_peripheral =
+            UartPeripheral::new(ctx.device.UART1, uart1_pins, &mut ctx.device.RESETS)
+                .enable(
+                    UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
+                    clocks.peripheral_clock.freq(),
+                )
+                .unwrap();
+        uart1_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
 
         // Use pin 4 (GPIO2) as the HC12 configuration pin
-        let hc12_configure_pin = pins.gpio2.into_push_pull_output();
-        let hc12 = HC12::new(uart_peripheral, hc12_configure_pin).unwrap();
+        let hc12_configure_pin = bank0_pins.gpio7.into_push_pull_output();
+        let hc12 = HC12::new(uart1_peripheral, hc12_configure_pin).unwrap();
 
         // Set up USB Device allocator
         let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
@@ -181,12 +213,15 @@ mod app {
         usb_serial_console_printer::spawn(usb_console_line_receiver).ok();
         usb_console_reader::spawn(usb_console_command_sender).ok();
         command_handler::spawn(usb_console_command_receiver).ok();
+        ngc::spawn().ok();
 
         // Serial Writer Structure
         let serial_console_writer = serial_handler::SerialWriter::new(usb_console_line_sender);
 
         (
             Shared {
+                uart0: uart0_peripheral,
+                uart0_buffer: uart0_buffer,
                 hc12,
                 usb_device: usb_dev,
                 usb_serial: serial,
@@ -499,7 +534,7 @@ mod app {
                     println!(
                         ctx,
                         "Stack Pointer: 0x{:08X}",
-                        utilities::get_stack_pointer()
+                        utilities::arm::get_stack_pointer()
                     );
                 }
 
@@ -563,5 +598,14 @@ mod app {
 
             hc12.clear();
         });
+    }
+
+    #[task(shared = [uart0], priority = 3)]
+    async fn ngc(mut ctx: ngc::Context, ) {
+        loop{
+            ctx.shared.uart0.lock(|uart0|{
+                uart0.write_full_blocking(b"Yeet...\n");
+            });
+        }
     }
 }

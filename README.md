@@ -77,11 +77,11 @@ The following file names in the config files will have to be changed to match yo
 ### Paths to change
 In .vscode/tasks.json:
 
-![alt text](image-1.png)
+![alt text](docs/images/image-1.png)
 
 In .vscode/launch.json:
 
-![alt text](image-2.png)
+![alt text](docs/images/image-2.png)
 
 
 
