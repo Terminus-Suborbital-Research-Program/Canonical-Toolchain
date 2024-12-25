@@ -15,6 +15,8 @@
                 "interface/cmsis-dap.cfg",
                 "target/rp2350.cfg"
             ],
+            // SVD File should match if you are debugging from a RP2040 or a RP2350...
+            // "svdFile": "${userHome}/.pico-sdk/sdk/2.1.0/src/rp2040/hardware_regs/RP2350.svd",
             "svdFile": "${userHome}/.pico-sdk/sdk/2.1.0/src/rp2350/hardware_regs/RP2350.svd",
             "runToEntryPoint": "main",
             "overrideLaunchCommands": [
