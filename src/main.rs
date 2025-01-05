@@ -154,11 +154,11 @@ mod app {
         led_pin.set_low().unwrap();
         // Start the heartbeat task
         heartbeat::spawn().ok();
-
+        
         // Get clock frequency
         let clock_freq = clocks.peripheral_clock.freq();
-
-
+        
+        
         // Pin setup for UART0
         let uart0_pins = (bank0_pins.gpio0.into_function(), bank0_pins.gpio1.into_function());
         let mut uart0_peripheral =
@@ -168,28 +168,28 @@ mod app {
                     clocks.peripheral_clock.freq(),
                 )
                 .unwrap();
-        uart0_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
-        let uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH> = heapless::String::new(); // Allocate uart0_buffer
-
-
-        // Pin setup for UART1
-        let uart1_pins = (bank0_pins.gpio8.into_function(), bank0_pins.gpio9.into_function());
-        let mut uart1_peripheral =
+            uart0_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
+            let uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH> = heapless::String::new(); // Allocate uart0_buffer
+            
+            
+            // Pin setup for UART1
+            let uart1_pins = (bank0_pins.gpio8.into_function(), bank0_pins.gpio9.into_function());
+            let mut uart1_peripheral =
             UartPeripheral::new(ctx.device.UART1, uart1_pins, &mut ctx.device.RESETS)
                 .enable(
                     UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
                     clocks.peripheral_clock.freq(),
                 )
                 .unwrap();
-        uart1_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
-
-        // Use pin 4 (GPIO2) as the HC12 configuration pin
-        let hc12_configure_pin = bank0_pins.gpio7.into_push_pull_output();
-        let hc12 = HC12::new(uart1_peripheral, hc12_configure_pin).unwrap();
-
-        // Set up USB Device allocator
-        let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
-            ctx.device.USB,
+            uart1_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
+            
+            // Use pin 4 (GPIO2) as the HC12 configuration pin
+            let hc12_configure_pin = bank0_pins.gpio7.into_push_pull_output();
+            let hc12 = HC12::new(uart1_peripheral, hc12_configure_pin).unwrap();
+            
+            // Set up USB Device allocator
+            let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
+                ctx.device.USB,
             ctx.device.USB_DPRAM,
             clocks.usb_clock,
             true,
@@ -202,18 +202,17 @@ mod app {
 
         let serial = SerialPort::new(usb_bus_ref);
         let usb_dev = UsbDeviceBuilder::new(usb_bus_ref, UsbVidPid(0x16c0, 0x27dd))
-            .strings(&[StringDescriptors::default()
-                .manufacturer("UAH TERMINUS PROGRAM")
-                .product("Canonical Toolchain USB Serial Port")
-                .serial_number("TEST")])
-            .unwrap()
-            .device_class(2)
-            .build();
-
+        .strings(&[StringDescriptors::default()
+        .manufacturer("UAH TERMINUS PROGRAM")
+        .product("Canonical Toolchain USB Serial Port")
+        .serial_number("TEST")])
+        .unwrap()
+        .device_class(2)
+        .build();
+    
         usb_serial_console_printer::spawn(usb_console_line_receiver).ok();
         usb_console_reader::spawn(usb_console_command_sender).ok();
         command_handler::spawn(usb_console_command_receiver).ok();
-        ngc::spawn().ok();
 
         // Serial Writer Structure
         let serial_console_writer = serial_handler::SerialWriter::new(usb_console_line_sender);
@@ -598,14 +597,5 @@ mod app {
 
             hc12.clear();
         });
-    }
-
-    #[task(shared = [uart0], priority = 3)]
-    async fn ngc(mut ctx: ngc::Context, ) {
-        loop{
-            ctx.shared.uart0.lock(|uart0|{
-                uart0.write_full_blocking(b"Yeet...\n");
-            });
-        }
     }
 }
