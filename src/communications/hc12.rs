@@ -171,6 +171,56 @@ impl<Uart, ConfigPin> HC12<Uart, ConfigPin> {
 
         buffer.contains(s)
     }
+
+
+    /// Similar, but for a char
+    pub fn contains_char(&self, c: char) -> bool {
+        let cloned_buffer = self.incoming_buffer.clone();
+        let mut buffer = HString::<128>::new();
+
+        for c in cloned_buffer {
+            let _ = buffer.push(c as char);
+        }
+
+        buffer.contains(c)
+    }
+
+    /// Returns a clone of the incoming buffer as a String
+    pub fn get_buffer(&self) -> HString<128> {
+        let cloned_buffer = self.incoming_buffer.clone();
+        let mut buffer = HString::<128>::new();
+
+        for c in cloned_buffer {
+            let _ = buffer.push(c as char);
+        }
+
+        buffer
+    }
+
+    /// Returns all characters up to and including a character, otherwise None
+    pub fn read_until(&mut self, c: u8) -> Option<HString<128>> {
+        match self.contains_char(c as char) {
+            false => None,
+
+            true => {
+                let mut buffer = HString::<128>::new();
+                while let Some(b) = self.incoming_buffer.pop_front() {
+                    buffer.push(b as char).ok()?;
+                    if b == c {
+                        break;
+                    }
+                }
+                Some(buffer)
+            }
+        }
+    }
+
+
+    /// Reads a line from the incoming buffer
+    #[inline]
+    pub fn read_line(&mut self) -> Option<HString<128>> {
+        self.read_until(b'\n')
+    }
 }
 
 impl<Uart, ConfigPin> HC12<Uart, ConfigPin>

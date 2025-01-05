@@ -36,13 +36,12 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
 mod app {
     use super::*;
     use actuators::*;
-    use communications::*;
+    use communications::{serial_handler::HeaplessString, *};
     use sensors::*;
     use utilities::*;
 
     use canonical_toolchain::{print, println};
     use embedded_hal::digital::{OutputPin, StatefulOutputPin};
-    use embedded_io::{Read, ReadReady};
     use fugit::RateExtU32;
     use hal::{
         gpio::{self, FunctionSio, PullNone, SioOutput},
@@ -64,7 +63,7 @@ mod app {
         channel::{Receiver, Sender},
         make_channel,
     };
-    use serial_handler::{HeaplessString, HEAPLESS_STRING_ALLOC_LENGTH, MAX_USB_LINES};
+    use serial_handler::{HEAPLESS_STRING_ALLOC_LENGTH, MAX_USB_LINES};
 
     pub type UART0Bus = UartPeripheral<
         rp235x_hal::uart::Enabled,
@@ -93,6 +92,7 @@ mod app {
         uart0: UART0Bus,
         uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>,
         hc12: HC12<UART1Bus, GPIO7>,
+        hc12_echo: bool,
         usb_serial: SerialPort<'static, hal::usb::UsbBus>,
         usb_device: UsbDevice<'static, hal::usb::UsbBus>,
         serial_console_writer: serial_handler::SerialWriter,
@@ -222,6 +222,7 @@ mod app {
                 uart0: uart0_peripheral,
                 uart0_buffer: uart0_buffer,
                 hc12,
+                hc12_echo: true,
                 usb_device: usb_dev,
                 usb_serial: serial,
                 serial_console_writer,
@@ -346,7 +347,7 @@ mod app {
     }
 
     // Command Handler
-    #[task(shared=[serial_console_writer, hc12, clock_freq_hz], priority = 2)]
+    #[task(shared=[serial_console_writer, hc12, hc12_echo, clock_freq_hz], priority = 2)]
     async fn command_handler(
         mut ctx: command_handler::Context,
         mut reciever: Receiver<
@@ -448,6 +449,14 @@ mod app {
                     // Print the current clock frequency
                     ctx.shared.clock_freq_hz.lock(|freq| {
                         println!(ctx, "Clock Frequency: {} Hz", freq);
+                    });
+                }
+
+                // Toggles the HC12 echo
+                "hc-echo" => {
+                    ctx.shared.hc12_echo.lock(|echo| {
+                        *echo = !*echo;
+                        println!(ctx, "HC12 Echo: {}", *echo);
                     });
                 }
 
@@ -597,5 +606,32 @@ mod app {
 
             hc12.clear();
         });
+    }
+
+    // While active, echos lines recieved from the HC12 module,
+    // 100ms after the last character is recieved
+    #[task(shared = [hc12, serial_console_writer, hc12_echo], priority = 2)]
+    async fn hc12_echo(mut ctx: hc12_echo::Context) {
+        loop {
+            if ctx.shared.hc12_echo.lock(|echo| *echo) {
+                match ctx.shared.hc12.lock(|hc| {
+                    hc.read_line()
+                }) {
+                    Some(line) => {
+                        Mono::delay(100.millis()).await; // Avoid cross-talk across the radio
+
+                        ctx.shared.hc12.lock(|hc| {
+                            hc.write_str(&line).ok();
+                        })
+                    }
+
+                    None => {
+                        continue;
+                    }
+                }
+            }
+
+            Mono::delay(100.millis()).await;
+        }
     }
 }
