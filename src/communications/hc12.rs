@@ -157,15 +157,19 @@ impl<Uart, ConfigPin> HC12<Uart, ConfigPin> {
 
     /// Checks if the incoming buffer contains "OK"
     pub fn check_ok(&self) -> bool {
+        self.contains("OK")
+    }
+
+    /// Checks if the buffer contains some &str
+    pub fn contains(&self, s: &str) -> bool {
         let cloned_buffer = self.incoming_buffer.clone();
         let mut buffer = HString::<128>::new();
 
-        // If pushing fails due to size, just skip. Or handle the error as needed.
         for c in cloned_buffer {
             let _ = buffer.push(c as char);
         }
 
-        buffer.contains("OK")
+        buffer.contains(s)
     }
 }
 
