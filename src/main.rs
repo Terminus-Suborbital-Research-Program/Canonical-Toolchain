@@ -397,7 +397,7 @@ mod app {
                             }
                         }
 
-                        match hc12.flush() {
+                        match hc12.flush(128) {
                             Ok(_) => {
                                 println!(ctx, "String flushed successfully!");
                             }
