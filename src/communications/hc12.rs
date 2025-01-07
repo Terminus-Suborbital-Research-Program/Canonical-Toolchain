@@ -305,18 +305,22 @@ where
     }
 
     /// Creates and initializes a new HC12 driver object.
-    pub fn new(uart: Uart, mut config_pin: ConfigPin) -> Result<Self, HC12Error> {
+    pub fn new(uart: Uart, config_pin: ConfigPin) -> Result<Self, HC12Error> {
         // Attempt to set the HC12 module to normal mode (config pin = LOW)
-        config_pin.set_low().map_err(|_| HC12Error::ConfigPinError)?;
+        
 
-        Ok(Self {
+        let mut hc12 = HC12 {
             uart: Some(uart),
             config_pin,
             mode: HC12Mode::Normal,
             baudrate: BaudRate::B9600,
             incoming_buffer: Deque::new(),
             outgoing_buffer: Deque::new(),
-        })
+        };
+
+        hc12.set_mode(HC12Mode::Normal)?;
+
+        Ok(hc12)
     }
 
     fn write_char(&mut self, c: u8) -> Result<(), HC12Error> {

@@ -86,6 +86,8 @@ mod app {
 
     static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
 
+    use core::fmt::Write as CoreWrite;
+
 
     #[shared]
     struct Shared {
@@ -579,6 +581,27 @@ mod app {
                             }
                         }
                     });
+                }
+
+                "hc-clear" => {
+                    // Clear the HC12 buffer
+                    ctx.shared.hc12.lock(|hc12| {
+                        hc12.clear();
+                    });
+                }
+
+                "hc-count" => {
+                    // Counts off from 0 to 255 on the HC12
+                    for i in 0..255 {
+                        let mut string = HeaplessString::new();
+                        let _ = write!(string, "{}\n", i);
+
+                        ctx.shared.hc12.lock(|hc12| {
+                            hc12.write_str(&string).ok();
+                        });
+
+                        Mono::delay(100_u64.millis()).await;
+                    }
                 }
 
                 "hc-set-power" => {
