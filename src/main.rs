@@ -42,7 +42,7 @@ mod app {
 
     use canonical_toolchain::{print, println};
     use embedded_hal::digital::{OutputPin, StatefulOutputPin};
-    use fugit::RateExtU32;
+    use fugit::{ExtU32, RateExtU32};
     use hal::{
         gpio::{self, FunctionSio, PullNone, SioOutput},
         sio::Sio,
@@ -213,6 +213,8 @@ mod app {
         usb_serial_console_printer::spawn(usb_console_line_receiver).ok();
         usb_console_reader::spawn(usb_console_command_sender).ok();
         command_handler::spawn(usb_console_command_receiver).ok();
+        hc12_flush::spawn().ok();
+        hc12_echo::spawn().ok();
 
         // Serial Writer Structure
         let serial_console_writer = serial_handler::SerialWriter::new(usb_console_line_sender);
@@ -222,7 +224,7 @@ mod app {
                 uart0: uart0_peripheral,
                 uart0_buffer: uart0_buffer,
                 hc12,
-                hc12_echo: true,
+                hc12_echo: false,
                 usb_device: usb_dev,
                 usb_serial: serial,
                 serial_console_writer,
@@ -238,12 +240,12 @@ mod app {
         loop {
             _ = ctx.local.led.toggle();
 
-            Mono::delay(500.millis()).await;
+            Mono::delay(500_u64.millis()).await;
         }
     }
 
     // Updates the HC12 module on the serial interrupt
-    #[task(binds = UART0_IRQ, shared = [hc12])]
+    #[task(binds = UART0_IRQ, shared = [hc12, serial_console_writer])]
     fn uart_interrupt(mut ctx: uart_interrupt::Context) {
         ctx.shared.hc12.lock(|hc12| {
             hc12.update().ok();
@@ -312,7 +314,7 @@ mod app {
             }
 
             // Wait for a bit to poll again
-            Mono::delay(1000.micros()).await;
+            Mono::delay(1000_u64.micros()).await;
         }
     }
 
@@ -343,6 +345,34 @@ mod app {
                     }
                 })
             })
+        }
+    }
+
+    // HC12 Flush Task
+    #[task(shared = [hc12], priority = 2)]
+    async fn hc12_flush(mut ctx: hc12_flush::Context) {
+        let mut on_board_baudrate: BaudRate = BaudRate::B9600;
+        let bytes_to_flush = 16;
+        
+        loop {
+            ctx.shared.hc12.lock(|hc12| {
+                hc12.flush(bytes_to_flush).ok();
+                on_board_baudrate = hc12.get_baudrate();
+            });
+
+            // Need to wait wait the in-air baudrate, or the on-board baudrate
+            // whichever is slower
+
+            let mut slower = core::cmp::min(
+                on_board_baudrate.to_u32(),
+                on_board_baudrate.to_in_air_bd(),
+            );
+
+            // slower is bps, so /1000 to get ms
+            slower = slower / 1000;
+
+            // Delay for that times the number of bytes flushed
+            Mono::delay((slower as u64 * bytes_to_flush as u64).millis()).await;
         }
     }
 
@@ -381,10 +411,59 @@ mod app {
                     hc12_selftest::spawn().ok();
                 }
 
+                // Peeks at the buffer, printing it to the console
+                "hc-peek" => {
+                    ctx.shared.hc12.lock(|hc12| {
+                        let buffer = hc12.clone_buffer();
+                        println!(ctx, "HC12 Buffer: {}", buffer);
+                    });
+                }
+
+                // Sets the HC12 mode to configuration or normal
+                "hc-mode" => {
+                    // Get the mode
+                    let mode = parts.next().unwrap_or_default();
+
+                    ctx.shared.hc12.lock(|hc12| {
+                        match mode {
+                            "config" => {
+                                println!(ctx, "Setting HC12 to Configuration Mode...");
+                                match hc12.set_mode(hc12::HC12Mode::Configuration) {
+                                    Ok(_) => {
+                                        println!(ctx, "HC12 set to Configuration Mode!");
+                                    }
+
+                                    Err(e) => {
+                                        println!(ctx, "Error setting HC12 to Configuration Mode: {:?}", e);
+                                    }
+                                }
+                            }
+
+                            "normal" => {
+                                println!(ctx, "Setting HC12 to Normal Mode...");
+                                match hc12.set_mode(hc12::HC12Mode::Normal) {
+                                    Ok(_) => {
+                                        println!(ctx, "HC12 set to Normal Mode!");
+                                    }
+
+                                    Err(e) => {
+                                        println!(ctx, "Error setting HC12 to Normal Mode: {:?}", e);
+                                    }
+                                }
+                            }
+
+                            _ => {
+                                println!(ctx, "Invalid mode: {}", mode);
+                            }
+                        }
+                    });
+                }
+
                 // Sends all characters after the command to the HC12 module
                 "hc-send-string" => {
                     // Get the string to send
-                    let string = parts.collect::<heapless::String<64>>();
+                    let mut string = parts.collect::<heapless::String<64>>();
+                    string.push('\n').ok();
 
                     ctx.shared.hc12.lock(|hc12| {
                         println!(ctx, "Writing string: {}", string);
@@ -422,7 +501,7 @@ mod app {
                     });
 
                     // Delay for 100ms
-                    Mono::delay(100.millis()).await;
+                    Mono::delay(100_u64.millis()).await;
 
                     ctx.shared.hc12.lock(|hc12| {
                         println!(ctx, "Setting channel to: {}", value);
@@ -438,7 +517,7 @@ mod app {
                     });
 
                     // Delay for 100ms and clear the buffer
-                    Mono::delay(100.millis()).await;
+                    Mono::delay(100_u64.millis()).await;
 
                     ctx.shared.hc12.lock(|hc12| {
                         hc12.clear();
@@ -456,7 +535,7 @@ mod app {
                 "hc-echo" => {
                     ctx.shared.hc12_echo.lock(|echo| {
                         *echo = !*echo;
-                        println!(ctx, "HC12 Echo: {}", *echo);
+                        println!(ctx, "HC12 Echo is now: {}", *echo);
                     });
                 }
 
@@ -514,7 +593,7 @@ mod app {
                     });
 
                     // Delay for 100ms
-                    Mono::delay(100.millis()).await;
+                    Mono::delay(100_u64.millis()).await;
 
                     ctx.shared.hc12.lock(|hc12| {
                         println!(ctx, "Setting power to: {}", value);
@@ -530,7 +609,7 @@ mod app {
                     });
 
                     // Delay for 100ms and clear the buffer
-                    Mono::delay(100.millis()).await;
+                    Mono::delay(100_u64.millis()).await;
 
                     ctx.shared.hc12.lock(|hc12| {
                         hc12.clear();
@@ -574,7 +653,7 @@ mod app {
             }
         });
 
-        Mono::delay(1000.millis()).await;
+        Mono::delay(1000_u64.millis()).await;
 
         ctx.shared.hc12.lock(|hc12| match hc12.check_at() {
             Err(e) => {
@@ -586,9 +665,11 @@ mod app {
             }
         });
 
-        Mono::delay(1000.millis()).await;
+        Mono::delay(1000_u64.millis()).await;
 
         ctx.shared.hc12.lock(|hc12| {
+            let buffer = hc12.clone_buffer();
+
             match hc12.check_ok() {
                 true => {
                     println!(ctx, "OK ACK Received!");
@@ -598,6 +679,8 @@ mod app {
                     println!(ctx, "Error: No OK Response Received!");
                 }
             }
+
+            println!(ctx, "HC12 Buffer: {}", buffer);
 
             println!(ctx, "Exiting Configuration Mode...");
             hc12.set_mode(hc12::HC12Mode::Normal).unwrap();
@@ -610,7 +693,7 @@ mod app {
 
     // While active, echos lines recieved from the HC12 module,
     // 100ms after the last character is recieved
-    #[task(shared = [hc12, serial_console_writer, hc12_echo], priority = 2)]
+    #[task(shared = [hc12, serial_console_writer, hc12_echo], priority = 1)]
     async fn hc12_echo(mut ctx: hc12_echo::Context) {
         loop {
             if ctx.shared.hc12_echo.lock(|echo| *echo) {
@@ -618,7 +701,10 @@ mod app {
                     hc.read_line()
                 }) {
                     Some(line) => {
-                        Mono::delay(100.millis()).await; // Avoid cross-talk across the radio
+                        // Print the line to the console
+                        println!(ctx, "HC12 Recieved: {}", line);
+
+                        Mono::delay(100_u64.millis()).await; // Avoid cross-talk across the radio
 
                         ctx.shared.hc12.lock(|hc| {
                             hc.write_str(&line).ok();
@@ -626,12 +712,12 @@ mod app {
                     }
 
                     None => {
-                        continue;
+                        
                     }
                 }
             }
 
-            Mono::delay(100.millis()).await;
+            Mono::delay(100_u64.millis()).await;
         }
     }
 }

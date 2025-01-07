@@ -79,6 +79,20 @@ impl BaudRate {
             _ => Err(HC12Error::InvalidBaudrate),
         }
     }
+
+    // In-air baudrate equivalent of the physical baudrate
+    pub fn to_in_air_bd(self) -> u32 {
+        match self {
+            BaudRate::B1200 => 5000,
+            BaudRate::B2400 => 5000,
+            BaudRate::B4800 => 15000,
+            BaudRate::B9600 => 15000,
+            BaudRate::B19200 => 58000,
+            BaudRate::B38400 => 58000,
+            BaudRate::B57600 => 236000,
+            BaudRate::B115200 => 236000,
+        }
+    }
 }
 
 impl fmt::Display for BaudRate {
@@ -155,6 +169,16 @@ impl<Uart, ConfigPin> HC12<Uart, ConfigPin> {
         self.incoming_buffer.clear();
     }
 
+    /// Clones the buffer as a string
+    pub fn clone_buffer(&self) -> HString<128> {
+        let mut buffer = HString::<128>::new();
+        for c in self.incoming_buffer.iter() {
+            buffer.push(*c as char).ok();
+        }
+
+        buffer
+    }
+
     /// Checks if the incoming buffer contains "OK"
     pub fn check_ok(&self) -> bool {
         self.contains("OK")
@@ -215,11 +239,15 @@ impl<Uart, ConfigPin> HC12<Uart, ConfigPin> {
         }
     }
 
-
     /// Reads a line from the incoming buffer
     #[inline]
     pub fn read_line(&mut self) -> Option<HString<128>> {
         self.read_until(b'\n')
+    }
+
+    // Gets the current baudrate
+    pub fn get_baudrate(&self) -> BaudRate {
+        self.baudrate
     }
 }
 
@@ -367,12 +395,12 @@ where
     pub fn set_mode(&mut self, mode: HC12Mode) -> Result<(), HC12Error> {
         match mode {
             HC12Mode::Normal => {
-                self.config_pin.set_low().map_err(|_| HC12Error::ConfigPinError)?;
+                self.config_pin.set_high().map_err(|_| HC12Error::ConfigPinError)?;
                 self.mode = HC12Mode::Normal;
             }
             HC12Mode::Configuration => {
                 self.config_pin
-                    .set_high()
+                    .set_low()
                     .map_err(|_| HC12Error::ConfigPinError)?;
 
                 // Per HC12 spec: configuration mode is always 9600 baud
@@ -408,7 +436,6 @@ where
         }
 
         self.outgoing_buffer.clear();
-        self.incoming_buffer.clear();
 
         self.write_str("AT\n")?;
         self.flush(128)?;
