@@ -1,8 +1,7 @@
 use alloc::vec::Vec;
 use bincode::{Decode, Encode};
-use defmt::todo;
 
-#[derive(Debug, Clone, Copy, Encode, Decode)]
+#[derive(Debug, Clone, Copy, Encode, Decode, PartialEq)]
 pub struct ScientificPacket {
     pub packets: u32,
     pub temperature: f32,
@@ -30,13 +29,13 @@ impl PacketType {
 }
 
 #[derive(Debug, Clone, Copy, Encode, Decode)]
-enum PacketVariation {
+pub enum PacketVariation {
     Scientific(ScientificPacket),
     Command(CommandPacket),
 }
 
 #[derive(Debug, Clone, Encode, Decode)]
-struct PacketFrame {
+pub struct PacketFrame {
     packet_type: PacketType,
     data: Vec<u8>,
 }

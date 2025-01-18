@@ -46,7 +46,9 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
 mod app {
     use super::*;
     use actuators::*;
+    use bincode::error::DecodeError::UnexpectedVariant;
     use communications::{serial_handler::HeaplessString, *};
+    use packets::{CommandPacket, PacketFrame, PacketVariation, ScientificPacket};
     use sensors::*;
     use utilities::*;
 
@@ -398,6 +400,7 @@ mod app {
 
     // Command Handler
     #[task(shared=[serial_console_writer, hc12, hc12_echo, clock_freq_hz], priority = 2)]
+    #[cfg(debug_assertions)]
     async fn command_handler(
         mut ctx: command_handler::Context,
         mut reciever: Receiver<
@@ -425,6 +428,64 @@ mod app {
                         },
                         hal::reboot::RebootArch::Normal,
                     );
+                }
+
+                "packet-test" => {
+                    // Create a command packet
+                    let packet = CommandPacket::MoveServoDegrees(90);
+
+                    // Print it
+                    println!(ctx, "{:?}", packet);
+
+                    // Serialize it and print the vector
+                    let serialized =
+                        bincode::encode_to_vec(&packet, bincode::config::standard()).unwrap();
+
+                    for byte in serialized.iter() {
+                        print!(ctx, "{:02X} ", byte);
+                        Mono::delay(100_u64.millis()).await;
+                    }
+                    println!(ctx, "");
+
+                    // Deserialize it and print the packet
+                    let deserialized: CommandPacket;
+                    let _bytes: usize;
+
+                    match bincode::decode_from_slice(&serialized, bincode::config::standard()) {
+                        Ok((packet, bytes)) => {
+                            deserialized = packet;
+                            _bytes = bytes;
+
+                            println!(ctx, "{:?}", deserialized);
+                        }
+
+                        Err(e) => match e {
+                            // Unexpected varient
+                            UnexpectedVariant {
+                                type_name,
+                                allowed,
+                                found,
+                            } => {
+                                println!(ctx, "Unexpected:");
+                                Mono::delay(1000_u64.millis()).await;
+                                println!(ctx, "Type Name: {}", type_name);
+                                Mono::delay(1000_u64.millis()).await;
+                                println!(ctx, "Allowed: {:?}", allowed);
+                                Mono::delay(1000_u64.millis()).await;
+                                println!(ctx, "Found: {:?}", found);
+                            }
+
+                            _ => {
+                                println!(ctx, "Error deserializing packet: {:?}", e);
+                            }
+                        },
+                    }
+
+                    // (deserialized, _bytes) =
+                    //     bincode::decode_from_slice(&serialized, bincode::config::standard())
+                    //         .unwrap();
+
+                    // println!(ctx, "{:?}", deserialized);
                 }
 
                 "hc-selftest" => {
