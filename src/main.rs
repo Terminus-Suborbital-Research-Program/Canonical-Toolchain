@@ -8,6 +8,16 @@ pub mod communications;
 pub mod sensors;
 pub mod utilities;
 
+// We require an allocator for some heap stuff - unfortunatly bincode serde
+// doesn't have support for heapless vectors yet
+extern crate alloc;
+use core::alloc::Layout;
+use linked_list_allocator::LockedHeap;
+
+#[global_allocator]
+static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static mut HEAP_MEMORY: [u8; 1024 * 64] = [0; 1024 * 64];
+
 use panic_halt as _;
 
 #[cfg(all(feature = "rp2040"))]
@@ -88,7 +98,6 @@ mod app {
 
     use core::fmt::Write as CoreWrite;
 
-
     #[shared]
     struct Shared {
         uart0: UART0Bus,
@@ -111,6 +120,13 @@ mod app {
         // Reset the spinlocks - this is skipped by soft-reset
         unsafe {
             hal::sio::spinlock_reset();
+        }
+
+        // Set up the global allocator
+        unsafe {
+            ALLOCATOR
+                .lock()
+                .init(HEAP_MEMORY.as_ptr() as *mut u8, HEAP_MEMORY.len());
         }
 
         // Channel for sending strings to the USB console
@@ -156,13 +172,15 @@ mod app {
         led_pin.set_low().unwrap();
         // Start the heartbeat task
         heartbeat::spawn().ok();
-        
+
         // Get clock frequency
         let clock_freq = clocks.peripheral_clock.freq();
-        
-        
+
         // Pin setup for UART0
-        let uart0_pins = (bank0_pins.gpio0.into_function(), bank0_pins.gpio1.into_function());
+        let uart0_pins = (
+            bank0_pins.gpio0.into_function(),
+            bank0_pins.gpio1.into_function(),
+        );
         let mut uart0_peripheral =
             UartPeripheral::new(ctx.device.UART0, uart0_pins, &mut ctx.device.RESETS)
                 .enable(
@@ -170,28 +188,30 @@ mod app {
                     clocks.peripheral_clock.freq(),
                 )
                 .unwrap();
-            uart0_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
-            let uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH> = heapless::String::new(); // Allocate uart0_buffer
-            
-            
-            // Pin setup for UART1
-            let uart1_pins = (bank0_pins.gpio8.into_function(), bank0_pins.gpio9.into_function());
-            let mut uart1_peripheral =
+        uart0_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
+        let uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH> = heapless::String::new(); // Allocate uart0_buffer
+
+        // Pin setup for UART1
+        let uart1_pins = (
+            bank0_pins.gpio8.into_function(),
+            bank0_pins.gpio9.into_function(),
+        );
+        let mut uart1_peripheral =
             UartPeripheral::new(ctx.device.UART1, uart1_pins, &mut ctx.device.RESETS)
                 .enable(
                     UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
                     clocks.peripheral_clock.freq(),
                 )
                 .unwrap();
-            uart1_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
-            
-            // Use pin 4 (GPIO2) as the HC12 configuration pin
-            let hc12_configure_pin = bank0_pins.gpio7.into_push_pull_output();
-            let hc12 = HC12::new(uart1_peripheral, hc12_configure_pin).unwrap();
-            
-            // Set up USB Device allocator
-            let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
-                ctx.device.USB,
+        uart1_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
+
+        // Use pin 4 (GPIO2) as the HC12 configuration pin
+        let hc12_configure_pin = bank0_pins.gpio7.into_push_pull_output();
+        let hc12 = HC12::new(uart1_peripheral, hc12_configure_pin).unwrap();
+
+        // Set up USB Device allocator
+        let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
+            ctx.device.USB,
             ctx.device.USB_DPRAM,
             clocks.usb_clock,
             true,
@@ -204,14 +224,14 @@ mod app {
 
         let serial = SerialPort::new(usb_bus_ref);
         let usb_dev = UsbDeviceBuilder::new(usb_bus_ref, UsbVidPid(0x16c0, 0x27dd))
-        .strings(&[StringDescriptors::default()
-        .manufacturer("UAH TERMINUS PROGRAM")
-        .product("Canonical Toolchain USB Serial Port")
-        .serial_number("TEST")])
-        .unwrap()
-        .device_class(2)
-        .build();
-    
+            .strings(&[StringDescriptors::default()
+                .manufacturer("UAH TERMINUS PROGRAM")
+                .product("Canonical Toolchain USB Serial Port")
+                .serial_number("TEST")])
+            .unwrap()
+            .device_class(2)
+            .build();
+
         usb_serial_console_printer::spawn(usb_console_line_receiver).ok();
         usb_console_reader::spawn(usb_console_command_sender).ok();
         command_handler::spawn(usb_console_command_receiver).ok();
@@ -355,7 +375,7 @@ mod app {
     async fn hc12_flush(mut ctx: hc12_flush::Context) {
         let mut on_board_baudrate: BaudRate = BaudRate::B9600;
         let bytes_to_flush = 16;
-        
+
         loop {
             ctx.shared.hc12.lock(|hc12| {
                 hc12.flush(bytes_to_flush).ok();
@@ -365,10 +385,8 @@ mod app {
             // Need to wait wait the in-air baudrate, or the on-board baudrate
             // whichever is slower
 
-            let mut slower = core::cmp::min(
-                on_board_baudrate.to_u32(),
-                on_board_baudrate.to_in_air_bd(),
-            );
+            let mut slower =
+                core::cmp::min(on_board_baudrate.to_u32(), on_board_baudrate.to_in_air_bd());
 
             // slower is bps, so /1000 to get ms
             slower = slower / 1000;
@@ -426,37 +444,38 @@ mod app {
                     // Get the mode
                     let mode = parts.next().unwrap_or_default();
 
-                    ctx.shared.hc12.lock(|hc12| {
-                        match mode {
-                            "config" => {
-                                println!(ctx, "Setting HC12 to Configuration Mode...");
-                                match hc12.set_mode(hc12::HC12Mode::Configuration) {
-                                    Ok(_) => {
-                                        println!(ctx, "HC12 set to Configuration Mode!");
-                                    }
+                    ctx.shared.hc12.lock(|hc12| match mode {
+                        "config" => {
+                            println!(ctx, "Setting HC12 to Configuration Mode...");
+                            match hc12.set_mode(hc12::HC12Mode::Configuration) {
+                                Ok(_) => {
+                                    println!(ctx, "HC12 set to Configuration Mode!");
+                                }
 
-                                    Err(e) => {
-                                        println!(ctx, "Error setting HC12 to Configuration Mode: {:?}", e);
-                                    }
+                                Err(e) => {
+                                    println!(
+                                        ctx,
+                                        "Error setting HC12 to Configuration Mode: {:?}", e
+                                    );
                                 }
                             }
+                        }
 
-                            "normal" => {
-                                println!(ctx, "Setting HC12 to Normal Mode...");
-                                match hc12.set_mode(hc12::HC12Mode::Normal) {
-                                    Ok(_) => {
-                                        println!(ctx, "HC12 set to Normal Mode!");
-                                    }
+                        "normal" => {
+                            println!(ctx, "Setting HC12 to Normal Mode...");
+                            match hc12.set_mode(hc12::HC12Mode::Normal) {
+                                Ok(_) => {
+                                    println!(ctx, "HC12 set to Normal Mode!");
+                                }
 
-                                    Err(e) => {
-                                        println!(ctx, "Error setting HC12 to Normal Mode: {:?}", e);
-                                    }
+                                Err(e) => {
+                                    println!(ctx, "Error setting HC12 to Normal Mode: {:?}", e);
                                 }
                             }
+                        }
 
-                            _ => {
-                                println!(ctx, "Invalid mode: {}", mode);
-                            }
+                        _ => {
+                            println!(ctx, "Invalid mode: {}", mode);
                         }
                     });
                 }
@@ -543,35 +562,32 @@ mod app {
 
                 "hc-set-baudrate" => {
                     // Get the baudrate and make sure it's valid
-                    let baudrate = parts
-                        .next()
-                        .and_then(|s| s.parse::<u32>().ok());
+                    let baudrate = parts.next().and_then(|s| s.parse::<u32>().ok());
 
                     let baudrate = match baudrate {
-                        Some(num) => {
-                            match BaudRate::from_u32(num) {
-                                Ok(rate) => rate,
-                                Err(_) => {
-                                    println!(ctx, "Invalid Baudrate: {}", num);
-                                    return;
-                                }
+                        Some(num) => match BaudRate::from_u32(num) {
+                            Ok(rate) => rate,
+                            Err(_) => {
+                                println!(ctx, "Invalid Baudrate: {}", num);
+                                return;
                             }
-                        }
+                        },
 
                         None => {
                             println!(ctx, "Bad String: {}", line);
                             return;
                         }
                     };
-                    
+
                     let mut freq = 0;
                     ctx.shared.clock_freq_hz.lock(|clock_freq| {
                         freq = *clock_freq;
                     });
 
                     // Set the baudrate
-                    ctx.shared.hc12.lock(|hc12| {
-                        match hc12.set_baudrate(baudrate, freq.Hz()) {
+                    ctx.shared
+                        .hc12
+                        .lock(|hc12| match hc12.set_baudrate(baudrate, freq.Hz()) {
                             Ok(_) => {
                                 println!(ctx, "Baudrate set successfully!");
                             }
@@ -579,8 +595,7 @@ mod app {
                             Err(e) => {
                                 println!(ctx, "Error setting baudrate: {:?}", e);
                             }
-                        }
-                    });
+                        });
                 }
 
                 "hc-clear" => {
@@ -720,9 +735,7 @@ mod app {
     async fn hc12_echo(mut ctx: hc12_echo::Context) {
         loop {
             if ctx.shared.hc12_echo.lock(|echo| *echo) {
-                match ctx.shared.hc12.lock(|hc| {
-                    hc.read_line()
-                }) {
+                match ctx.shared.hc12.lock(|hc| hc.read_line()) {
                     Some(line) => {
                         // Print the line to the console
                         println!(ctx, "HC12 Recieved: {}", line);
@@ -734,9 +747,7 @@ mod app {
                         })
                     }
 
-                    None => {
-                        
-                    }
+                    None => {}
                 }
             }
 
