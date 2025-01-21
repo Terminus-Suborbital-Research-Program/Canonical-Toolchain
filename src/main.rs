@@ -548,7 +548,7 @@ mod app {
 
                     ctx.shared.hc12.lock(|hc12| {
                         println!(ctx, "Writing string: {}", string);
-                        match hc12.write_str(&string) {
+                        match hc12.write(&string.as_bytes()) {
                             Ok(_) => {
                                 println!(ctx, "String wrote successfully!");
                             }
@@ -672,7 +672,7 @@ mod app {
                         let _ = write!(string, "{}\n", i);
 
                         ctx.shared.hc12.lock(|hc12| {
-                            hc12.write_str(&string).ok();
+                            hc12.write(&string.as_bytes()).ok();
                         });
 
                         Mono::delay(100_u64.millis()).await;
@@ -803,7 +803,7 @@ mod app {
                         Mono::delay(100_u64.millis()).await; // Avoid cross-talk across the radio
 
                         ctx.shared.hc12.lock(|hc| {
-                            hc.write_str(&line).ok();
+                            hc.write(&line.as_bytes()).ok();
                         })
                     }
 
