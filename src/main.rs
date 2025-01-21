@@ -11,7 +11,6 @@ pub mod utilities;
 // We require an allocator for some heap stuff - unfortunatly bincode serde
 // doesn't have support for heapless vectors yet
 extern crate alloc;
-use core::alloc::Layout;
 use linked_list_allocator::LockedHeap;
 
 #[global_allocator]
@@ -46,9 +45,9 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
 mod app {
     use super::*;
     use actuators::*;
+    use application_layer::{CommandPacket, PacketFrame, PacketVariation, ScientificPacket};
     use bincode::error::DecodeError::UnexpectedVariant;
     use communications::{serial_handler::HeaplessString, *};
-    use packets::{CommandPacket, PacketFrame, PacketVariation, ScientificPacket};
     use sensors::*;
     use utilities::*;
 
