@@ -30,13 +30,14 @@ usbd-serial = "0.2.2"
 # Time
 embedded-time = "0.12.1"
 fugit = "0.3.7"
-# Allocator, when needed
+# Allocator - requireed to get serde to work
 linked_list_allocator = "0.10.5"
 
 # logging
 defmt = "0.3"
 defmt-rtt = "0.4.0"
 heapless = "0.8.0"
+bincode = {version="2.0.0-rc.3", features = ["derive", "alloc"], default-features = false}
 
 # Target features
 [features]
@@ -51,3 +52,9 @@ rp2040 = [
     "rtic-monotonics/rp2040",
     "rtic/thumbv6-backend"
 ]
+
+[profile.dev]
+lto = false
+
+[profile.release]
+lto = true
