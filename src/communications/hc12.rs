@@ -155,7 +155,6 @@ pub struct HC12<Uart, ConfigPin> {
     config_pin: ConfigPin,
     mode: HC12Mode,
     baudrate: BaudRate,
-
     incoming_buffer: Deque<u8, 128>,
     outgoing_buffer: Deque<u8, 128>,
 }
@@ -237,6 +236,11 @@ impl<Uart, ConfigPin> HC12<Uart, ConfigPin> {
                 Some(buffer)
             }
         }
+    }
+
+    // Number of bytes available to write to the outgoing buffer
+    pub fn max_bytes_to_write(&self) -> usize {
+        128 - self.outgoing_buffer.len()
     }
 
     // Reads a line from the incoming buffer

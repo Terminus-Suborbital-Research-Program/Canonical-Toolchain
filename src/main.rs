@@ -45,7 +45,7 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
 mod app {
     use super::*;
     use actuators::*;
-    use application_layer::{CommandPacket, PacketFrame, PacketVariation, ScientificPacket};
+    use application_layer::{CommandPacket, ScientificPacket};
     use bincode::error::DecodeError::UnexpectedVariant;
     use communications::{serial_handler::HeaplessString, *};
     use sensors::*;
