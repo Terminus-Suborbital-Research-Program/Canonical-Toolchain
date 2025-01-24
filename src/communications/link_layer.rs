@@ -1,7 +1,6 @@
 use bincode::{
     config::standard, de::read::Reader, enc::write::Writer, error::DecodeError, Decode, Encode,
 };
-use defmt::todo;
 use embedded_io::{Read, ReadReady, Write, WriteReady};
 
 use super::{application_layer::ApplicationPacket, hc12::HC12};
@@ -70,7 +69,7 @@ impl LinkPacket {
 // Device to act as a link layer connection, from a embedded_hal::Read/Write/ReadReady/WriteReady
 // to a bincode::Reader/Writer
 pub struct LinkLayerDevice<D> {
-    device: D,
+    pub device: D,
 }
 
 impl<D, P> Reader for LinkLayerDevice<HC12<D, P>>
