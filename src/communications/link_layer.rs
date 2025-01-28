@@ -1,5 +1,10 @@
 use bincode::{
-    config::standard, de::read::Reader, enc::write::Writer, error::DecodeError, Decode, Encode,
+    config::standard,
+    de::read::Reader,
+    enc::write::Writer,
+    encode_into_slice,
+    error::{DecodeError, EncodeError},
+    Decode, Encode,
 };
 use embedded_io::{Read, ReadReady, Write, WriteReady};
 
@@ -11,6 +16,7 @@ pub enum LinkLayerPayload {
     Payload(ApplicationPacket),
     ACK,
     NACK,
+    NODATA,
 }
 
 #[derive(Debug, Clone, Copy, Encode, Decode, Hash)]
@@ -29,7 +35,7 @@ pub struct LinkPacket {
     pub to_device: Device,
     pub route_through: Option<Device>,
     pub payload: LinkLayerPayload,
-    checksum: u32,
+    pub checksum: Option<u32>,
 }
 
 impl LinkPacket {
@@ -57,12 +63,27 @@ impl LinkPacket {
 
     // Set the checksum field to the correct value
     pub fn set_checksum(&mut self) {
-        self.checksum = self.checksum();
+        self.checksum = Some(self.checksum());
     }
 
     // Verify the checksum field is correct
     pub fn verify_checksum(&self) -> bool {
-        self.checksum == self.checksum()
+        match self.checksum {
+            Some(checksum) => checksum == self.checksum(),
+            None => false,
+        }
+    }
+}
+
+impl Default for LinkPacket {
+    fn default() -> Self {
+        Self {
+            from_device: Device::Tester,
+            to_device: Device::Tester,
+            route_through: None,
+            payload: LinkLayerPayload::NODATA,
+            checksum: None,
+        }
     }
 }
 
@@ -70,43 +91,48 @@ impl LinkPacket {
 // to a bincode::Reader/Writer
 pub struct LinkLayerDevice<D> {
     pub device: D,
+    pub me: Device,
 }
 
-impl<D, P> Reader for LinkLayerDevice<HC12<D, P>>
-where
-    HC12<D, P>: ReadReady + Read,
-{
-    fn read(&mut self, bytes: &mut [u8]) -> Result<(), DecodeError> {
-        let device_avialable = self.device.bytes_available();
-        let wanted_bytes = bytes.len();
+impl<D> LinkLayerDevice<D> {
+    pub fn new(device: D, me: Device) -> Self {
+        Self { device, me }
+    }
 
-        match device_avialable < wanted_bytes {
-            true => Err(DecodeError::UnexpectedEnd {
-                additional: wanted_bytes - device_avialable,
-            }),
-
-            false => match self.device.read(bytes) {
-                Ok(_) => Ok(()),
-                Err(_) => Err(DecodeError::Other("Underlying Device issue!")),
-            },
+    pub fn construct_packet(&self, packload: ApplicationPacket, to: Device) -> LinkPacket {
+        LinkPacket {
+            from_device: self.me,
+            to_device: to,
+            route_through: None,
+            payload: LinkLayerPayload::Payload(packload),
+            checksum: None,
         }
     }
 }
 
-impl<D, P> Writer for LinkLayerDevice<HC12<D, P>>
+// When we can write, we can encode packets to the underlying device
+impl<D> LinkLayerDevice<D>
 where
-    HC12<D, P>: WriteReady + Write,
+    D: Write,
 {
-    fn write(&mut self, bytes: &[u8]) -> Result<(), bincode::error::EncodeError> {
-        match self.device.max_bytes_to_write() < bytes.len() {
-            true => Err(bincode::error::EncodeError::UnexpectedEnd),
+    pub fn write_link_packet(&mut self, packet: LinkPacket) -> Result<(), EncodeError> {
+        let mut slice = [0u8; 128];
+        let written = encode_into_slice(packet, &mut slice, standard())?;
+        self.device.write(&slice[..written]).ok();
+        self.device.flush().ok();
+        Ok(())
+    }
+}
 
-            false => match self.write(bytes) {
-                Ok(_) => Ok(()),
-                Err(_) => Err(bincode::error::EncodeError::Other(
-                    "Underlying Device issue!",
-                )),
-            },
-        }
+// When we can read, we can decode packets from the underlying device
+impl<D> LinkLayerDevice<D>
+where
+    D: Read,
+{
+    pub fn read_link_packet(&mut self) -> Result<LinkPacket, DecodeError> {
+        let mut slice = [0u8; 128];
+        let read = self.device.read(&mut slice).unwrap();
+        let packet = bincode::decode_from_slice(&slice[..read], standard())?;
+        Ok(packet.0)
     }
 }

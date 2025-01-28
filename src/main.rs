@@ -17,6 +17,9 @@ use linked_list_allocator::LockedHeap;
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 static mut HEAP_MEMORY: [u8; 1024 * 64] = [0; 1024 * 64];
 
+static min_duty: u32 = 2200;
+static max_duty: u32 = 8200;
+
 use panic_halt as _;
 
 #[cfg(all(feature = "rp2040"))]
@@ -43,6 +46,8 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
     dispatchers = [PIO2_IRQ_0, PIO2_IRQ_1, DMA_IRQ_0],
 )]
 mod app {
+    use crate::{actuators::servo::Servo, communications::link_layer::Device};
+
     use super::*;
     use actuators::*;
     use application_layer::{CommandPacket, ScientificPacket};
@@ -52,7 +57,10 @@ mod app {
     use utilities::*;
 
     use canonical_toolchain::{print, println};
-    use embedded_hal::digital::{OutputPin, StatefulOutputPin};
+    use embedded_hal::{
+        digital::{OutputPin, StatefulOutputPin},
+        pwm::SetDutyCycle,
+    };
     use fugit::{ExtU32, RateExtU32};
     use hal::{
         gpio::{self, FunctionSio, PullNone, SioOutput},
@@ -60,6 +68,7 @@ mod app {
     };
     use rp235x_hal::{
         clocks::init_clocks_and_plls,
+        pwm::{Channel, CountFallingEdge, FreeRunning, InputHighRunning, Pwm7, Slice, Slices, B},
         uart::{DataBits, StopBits, UartConfig, UartPeripheral},
         Clock, Watchdog,
     };
@@ -95,6 +104,11 @@ mod app {
         ),
     >;
 
+    pub type EjectorServoChannel = Servo<
+        Channel<Slice<Pwm7, FreeRunning>, B>,
+        gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionPwm, gpio::PullDown>,
+    >;
+
     static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
 
     use core::fmt::Write as CoreWrite;
@@ -103,6 +117,7 @@ mod app {
     struct Shared {
         uart0: UART0Bus,
         uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>,
+        ejector_pin: EjectorServoChannel,
         radio_link: LinkLayerDevice<HC12<UART1Bus, GPIO7>>,
         usb_serial: SerialPort<'static, hal::usb::UsbBus>,
         usb_device: UsbDevice<'static, hal::usb::UsbBus>,
@@ -208,7 +223,24 @@ mod app {
         // Use pin 4 (GPIO2) as the HC12 configuration pin
         let hc12_configure_pin = bank0_pins.gpio7.into_push_pull_output();
         let hc12 = HC12::new(uart1_peripheral, hc12_configure_pin).unwrap();
-        let radio_link = LinkLayerDevice { device: hc12 };
+        let radio_link = LinkLayerDevice {
+            device: hc12,
+            me: Device::Ejector,
+        };
+
+        // Servo
+        let pwm_slices = Slices::new(ctx.device.PWM, &mut ctx.device.RESETS);
+        let mut pwm = pwm_slices.pwm7;
+        pwm.enable();
+        pwm.set_div_int(48);
+
+        let mut channel_b = pwm.channel_b;
+        let channel_pin = channel_b.output_to(bank0_pins.gpio15);
+        let cycle = min_duty + ((max_duty - min_duty) * 90) / 200;
+        channel_b.set_duty_cycle(cycle as u16).unwrap();
+        channel_b.set_enabled(true);
+
+        let ejection_servo = Servo::new(channel_b, channel_pin);
 
         // Set up USB Device allocator
         let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
@@ -246,6 +278,7 @@ mod app {
                 uart0: uart0_peripheral,
                 uart0_buffer,
                 radio_link,
+                ejector_pin: ejection_servo,
                 usb_device: usb_dev,
                 usb_serial: serial,
                 serial_console_writer,
@@ -396,7 +429,7 @@ mod app {
     }
 
     // Command Handler
-    #[task(shared=[serial_console_writer, radio_link, clock_freq_hz], priority = 2)]
+    #[task(shared=[serial_console_writer, radio_link, clock_freq_hz, ejector_pin], priority = 2)]
     #[cfg(debug_assertions)]
     async fn command_handler(
         mut ctx: command_handler::Context,
@@ -425,6 +458,20 @@ mod app {
                         },
                         hal::reboot::RebootArch::Normal,
                     );
+                }
+
+                "set-servo" => {
+                    // Parse arg as int or fail
+                    let arg = parts
+                        .next()
+                        .unwrap_or_default()
+                        .parse::<u32>()
+                        .unwrap_or_default();
+                    //channel_b.set_duty_cycle_percent(0).unwrap();
+                    ctx.shared.ejector_pin.lock(|channel| {
+                        //let cycle = min_duty + ((max_duty - min_duty) * arg) / 200;
+                        channel.set_angle(arg as u16);
+                    });
                 }
 
                 "packet-test" => {
