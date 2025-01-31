@@ -17,9 +17,6 @@ use linked_list_allocator::LockedHeap;
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 static mut HEAP_MEMORY: [u8; 1024 * 64] = [0; 1024 * 64];
 
-static min_duty: u32 = 2200;
-static max_duty: u32 = 8200;
-
 use panic_halt as _;
 
 #[cfg(all(feature = "rp2040"))]
@@ -46,7 +43,13 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
     dispatchers = [PIO2_IRQ_0, PIO2_IRQ_1, DMA_IRQ_0],
 )]
 mod app {
-    use crate::{actuators::servo::Servo, communications::link_layer::Device};
+    use crate::{
+        actuators::servo::{
+            EjectionServo, EjectionServoMosfet, LockingServo, LockingServoMosfet, Servo,
+            LOCKING_SERVO_LOCKED,
+        },
+        communications::link_layer::Device,
+    };
 
     use super::*;
     use actuators::*;
@@ -104,20 +107,16 @@ mod app {
         ),
     >;
 
-    pub type EjectorServoChannel = Servo<
-        Channel<Slice<Pwm7, FreeRunning>, B>,
-        gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionPwm, gpio::PullDown>,
-    >;
-
     static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
 
     use core::fmt::Write as CoreWrite;
 
     #[shared]
     struct Shared {
-        uart0: UART0Bus,
-        uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>,
-        ejector_pin: EjectorServoChannel,
+        //uart0: UART0Bus,
+        //uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>,
+        ejector_driver: EjectionServo,
+        locking_driver: LockingServo,
         radio_link: LinkLayerDevice<HC12<UART1Bus, GPIO7>>,
         usb_serial: SerialPort<'static, hal::usb::UsbBus>,
         usb_device: UsbDevice<'static, hal::usb::UsbBus>,
@@ -192,19 +191,19 @@ mod app {
         let clock_freq = clocks.peripheral_clock.freq();
 
         // Pin setup for UART0
-        let uart0_pins = (
-            bank0_pins.gpio0.into_function(),
-            bank0_pins.gpio1.into_function(),
-        );
-        let mut uart0_peripheral =
-            UartPeripheral::new(ctx.device.UART0, uart0_pins, &mut ctx.device.RESETS)
-                .enable(
-                    UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
-                    clocks.peripheral_clock.freq(),
-                )
-                .unwrap();
-        uart0_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
-        let uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH> = heapless::String::new(); // Allocate uart0_buffer
+        // let uart0_pins = (
+        //     bank0_pins.gpio0.into_function(),
+        //     bank0_pins.gpio1.into_function(),
+        // );
+        // let mut uart0_peripheral =
+        //     UartPeripheral::new(ctx.device.UART0, uart0_pins, &mut ctx.device.RESETS)
+        //         .enable(
+        //             UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
+        //             clocks.peripheral_clock.freq(),
+        //         )
+        //         .unwrap();
+        // uart0_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
+        //let uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH> = heapless::String::new(); // Allocate uart0_buffer
 
         // Pin setup for UART1
         let uart1_pins = (
@@ -230,17 +229,30 @@ mod app {
 
         // Servo
         let pwm_slices = Slices::new(ctx.device.PWM, &mut ctx.device.RESETS);
-        let mut pwm = pwm_slices.pwm7;
-        pwm.enable();
-        pwm.set_div_int(48);
+        let mut ejection_pwm = pwm_slices.pwm0;
+        ejection_pwm.enable();
+        ejection_pwm.set_div_int(48);
+        // Pin for servo mosfet digital
+        let mut mosfet_pin: EjectionServoMosfet = bank0_pins.gpio1.into_push_pull_output();
+        mosfet_pin.set_low().unwrap();
+        let mut channel_a = ejection_pwm.channel_a;
+        let channel_pin = channel_a.output_to(bank0_pins.gpio0);
+        channel_a.set_enabled(true);
+        let mut ejection_servo = Servo::new(channel_a, channel_pin, mosfet_pin);
+        ejection_servo.set_angle(90);
 
-        let mut channel_b = pwm.channel_b;
-        let channel_pin = channel_b.output_to(bank0_pins.gpio15);
-        let cycle = min_duty + ((max_duty - min_duty) * 90) / 200;
-        channel_b.set_duty_cycle(cycle as u16).unwrap();
-        channel_b.set_enabled(true);
-
-        let ejection_servo = Servo::new(channel_b, channel_pin);
+        // Locking servo
+        let mut locking_pwm = pwm_slices.pwm1;
+        locking_pwm.enable();
+        locking_pwm.set_div_int(48);
+        let mut locking_mosfet_pin: LockingServoMosfet = bank0_pins.gpio3.into_push_pull_output();
+        locking_mosfet_pin.set_low().unwrap();
+        let mut locking_channel_a = locking_pwm.channel_a;
+        let locking_channel_pin = locking_channel_a.output_to(bank0_pins.gpio2);
+        locking_channel_a.set_enabled(true);
+        let mut locking_servo =
+            Servo::new(locking_channel_a, locking_channel_pin, locking_mosfet_pin);
+        locking_servo.set_angle(LOCKING_SERVO_LOCKED);
 
         // Set up USB Device allocator
         let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
@@ -275,10 +287,11 @@ mod app {
 
         (
             Shared {
-                uart0: uart0_peripheral,
-                uart0_buffer,
+                //uart0: uart0_peripheral,
+                //uart0_buffer,
                 radio_link,
-                ejector_pin: ejection_servo,
+                ejector_driver: ejection_servo,
+                locking_driver: locking_servo,
                 usb_device: usb_dev,
                 usb_serial: serial,
                 serial_console_writer,
@@ -429,7 +442,7 @@ mod app {
     }
 
     // Command Handler
-    #[task(shared=[serial_console_writer, radio_link, clock_freq_hz, ejector_pin], priority = 2)]
+    #[task(shared=[serial_console_writer, radio_link, clock_freq_hz, ejector_driver, locking_driver], priority = 2)]
     #[cfg(debug_assertions)]
     async fn command_handler(
         mut ctx: command_handler::Context,
@@ -468,9 +481,47 @@ mod app {
                         .parse::<u32>()
                         .unwrap_or_default();
                     //channel_b.set_duty_cycle_percent(0).unwrap();
-                    ctx.shared.ejector_pin.lock(|channel| {
+                    ctx.shared.ejector_driver.lock(|channel| {
                         //let cycle = min_duty + ((max_duty - min_duty) * arg) / 200;
                         channel.set_angle(arg as u16);
+                    });
+                }
+
+                "enable-servo" => {
+                    ctx.shared.ejector_driver.lock(|channel| {
+                        channel.enable();
+                    });
+                }
+
+                "disable-servo" => {
+                    ctx.shared.ejector_driver.lock(|channel| {
+                        channel.disable();
+                    });
+                }
+
+                "set-locking-servo" => {
+                    // Parse arg as int or fail
+                    let arg = parts
+                        .next()
+                        .unwrap_or_default()
+                        .parse::<u32>()
+                        .unwrap_or_default();
+                    //channel_b.set_duty_cycle_percent(0).unwrap();
+                    ctx.shared.locking_driver.lock(|channel| {
+                        //let cycle = min_duty + ((max_duty - min_duty) * arg) / 200;
+                        channel.set_angle(arg as u16);
+                    });
+                }
+
+                "enable-locking-servo" => {
+                    ctx.shared.locking_driver.lock(|channel| {
+                        channel.enable();
+                    });
+                }
+
+                "disable-locking-servo" => {
+                    ctx.shared.locking_driver.lock(|channel| {
+                        channel.disable();
                     });
                 }
 
