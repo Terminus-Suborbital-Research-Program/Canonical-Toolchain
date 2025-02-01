@@ -70,6 +70,7 @@ mod app {
 
     use canonical_toolchain::{print, println};
     use embedded_hal::digital::{OutputPin, StatefulOutputPin};
+    use embedded_io::Read;
     use fugit::RateExtU32;
     use hal::{
         gpio::{self, FunctionSio, PullNone, SioOutput},
@@ -323,6 +324,16 @@ mod app {
                     DecodeError::UnexpectedEnd { additional } => {
                         // Nothing to do here
                     }
+
+                    // These decoding errors cause us to pop the front of the buffer to remove the character
+                    #[allow(unused_variables)]
+                    DecodeError::InvalidIntegerType { expected, found } => {
+                        let mut buffer = [0u8; 1];
+                        ctx.shared
+                            .radio_link
+                            .lock(|radio| radio.device.read(&mut buffer).ok());
+                    }
+
                     _ => {
                         let mut buffer = alloc::string::String::new();
                         write!(buffer, "Error decoding packet: {:#?}", e).ok();
@@ -381,7 +392,7 @@ mod app {
                                         println!(ctx, "Received Connection Test End");
 
                                         let percentage_recieved =
-                                            (connection_test_sequence as f32 / 255.0) * 100.0;
+                                            (connection_test_sequence as f32 / 256.0) * 100.0;
                                         println!(
                                             ctx,
                                             "Received {}% of the connection test sequence",
@@ -412,7 +423,7 @@ mod app {
                 }
             }
 
-            Mono::delay(100_u64.millis()).await;
+            Mono::delay(10_u64.millis()).await;
         }
     }
 
@@ -695,18 +706,18 @@ mod app {
                             bincode::encode_to_vec(&link_packet, bincode::config::standard())
                                 .unwrap();
 
+                        ctx.shared.radio_link.lock(|device| {
+                            device.device.write(&serialized).ok();
+                        });
+
                         if connection == ConnectionTest::End {
                             break;
                         }
 
-                        ctx.shared.radio_link.lock(|device| {
-                            device.device.write(&serialized).ok();
-                        });
-                        //println!(ctx, "Sent sequence");
-
                         // Update the connection test sequence
                         connection = match connection {
                             ConnectionTest::Start => {
+                                println!(ctx, "Starting Connection Test");
                                 sequence_number = 0;
                                 ConnectionTest::Sequence(sequence_number)
                             }
@@ -716,11 +727,15 @@ mod app {
                                     ConnectionTest::End
                                 } else {
                                     sequence_number += 1;
+                                    println!(ctx, "Sequence: {}", sequence_number);
                                     ConnectionTest::Sequence(sequence_number)
                                 }
                             }
 
-                            ConnectionTest::End => ConnectionTest::Start,
+                            ConnectionTest::End => {
+                                println!(ctx, "Ending Connection Test");
+                                ConnectionTest::Start
+                            }
                         };
 
                         Mono::delay(300_u64.millis()).await;
@@ -858,12 +873,15 @@ mod app {
                 "hc-configure" => {
                     // Clear out the buffer, the HC12 often sends a bit of junk when
                     // it goes into config mode
+                    println!(ctx, "Clearing Buffer");
                     ctx.shared.radio_link.lock(|link| {
                         link.device.clear();
                         link.device.write("AT\n".as_bytes()).ok();
                     });
 
                     Mono::delay(500_u64.millis()).await;
+
+                    println!(ctx, "AT Command Sent");
                     ctx.shared.radio_link.lock(|link| {
                         link.device.update().ok();
                         while link.device.read_ready().unwrap_or(false) {
