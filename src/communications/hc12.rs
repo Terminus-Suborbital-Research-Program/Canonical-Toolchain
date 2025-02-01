@@ -1,4 +1,3 @@
-use alloc::borrow::ToOwned;
 use core::fmt::{self, Write as FmtWrite};
 use defmt::todo;
 use embedded_hal::digital::OutputPin;

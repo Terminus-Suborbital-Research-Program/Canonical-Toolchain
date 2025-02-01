@@ -1,14 +1,13 @@
 use bincode::{
     config::standard,
-    de::read::Reader,
     enc::write::Writer,
     encode_into_slice,
     error::{DecodeError, EncodeError},
     Decode, Encode,
 };
-use embedded_io::{Read, ReadReady, Write, WriteReady};
+use embedded_io::{Read, Write};
 
-use super::{application_layer::ApplicationPacket, hc12::HC12};
+use super::application_layer::ApplicationPacket;
 
 #[derive(Debug, Clone, Copy, Encode, Decode)]
 #[allow(non_camel_case_types)]

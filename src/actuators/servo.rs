@@ -1,7 +1,7 @@
 use embedded_hal::{digital::OutputPin, pwm::SetDutyCycle};
 use rp235x_hal::{
     gpio,
-    pwm::{Channel, FreeRunning, Slice, A, B},
+    pwm::{Channel, FreeRunning, Slice, A},
 };
 
 /// Ejector servo types

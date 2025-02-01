@@ -55,8 +55,8 @@ mod app {
     };
 
     use super::*;
-    use actuators::*;
-    use application_layer::{CommandPacket, ScientificPacket};
+    
+    use application_layer::CommandPacket;
     use bincode::{
         config::standard,
         error::DecodeError::{self, UnexpectedVariant},
@@ -67,14 +67,11 @@ mod app {
         serial_handler::HeaplessString,
         *,
     };
-    use sensors::*;
-    use utilities::*;
+    
+    
 
     use canonical_toolchain::{print, println};
-    use embedded_hal::{
-        digital::{OutputPin, StatefulOutputPin},
-        pwm::SetDutyCycle,
-    };
+    use embedded_hal::digital::{OutputPin, StatefulOutputPin};
     use fugit::{ExtU32, RateExtU32};
     use hal::{
         gpio::{self, FunctionSio, PullNone, SioOutput},
@@ -82,7 +79,7 @@ mod app {
     };
     use rp235x_hal::{
         clocks::init_clocks_and_plls,
-        pwm::{Channel, CountFallingEdge, FreeRunning, InputHighRunning, Pwm7, Slice, Slices, B},
+        pwm::Slices,
         uart::{DataBits, StopBits, UartConfig, UartPeripheral},
         Clock, Watchdog,
     };
