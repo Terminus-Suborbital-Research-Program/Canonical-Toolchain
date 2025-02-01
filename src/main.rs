@@ -17,9 +17,6 @@ use linked_list_allocator::LockedHeap;
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 static mut HEAP_MEMORY: [u8; 1024 * 64] = [0; 1024 * 64];
 
-static min_duty: u32 = 2200;
-static max_duty: u32 = 8200;
-
 use panic_halt as _;
 
 #[cfg(all(feature = "rp2040"))]
@@ -41,26 +38,27 @@ rp235x_timer_monotonic!(Mono);
 #[cfg(feature = "rp2350")]
 pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef::secure_exe();
 
-#[rtic::app(
+ #[rtic::app(
     device = hal::pac,
     dispatchers = [PIO2_IRQ_0, PIO2_IRQ_1, DMA_IRQ_0],
 )]
 mod app {
-    use crate::{actuators::servo::Servo, communications::link_layer::Device};
+    use crate::{actuators::{servo::Servo, motor::Motor}, communications::link_layer::Device};
 
     use super::*;
     use actuators::*;
     use application_layer::{CommandPacket, ScientificPacket};
     use bincode::error::DecodeError::UnexpectedVariant;
     use communications::{link_layer::LinkLayerDevice, serial_handler::HeaplessString, *};
+    use rtic_monotonics::rtic_time::timer_queue::Delay;
     use sensors::*;
     use utilities::*;
 
     use canonical_toolchain::{print, println};
     use embedded_hal::{
-        digital::{OutputPin, StatefulOutputPin},
-        pwm::SetDutyCycle,
+        digital::{OutputPin, StatefulOutputPin}, i2c::{self, I2c}, pwm::SetDutyCycle
     };
+    
     use fugit::{ExtU32, RateExtU32};
     use hal::{
         gpio::{self, FunctionSio, PullNone, SioOutput},
@@ -68,9 +66,12 @@ mod app {
     };
     use rp235x_hal::{
         clocks::init_clocks_and_plls,
-        pwm::{Channel, CountFallingEdge, FreeRunning, InputHighRunning, Pwm7, Slice, Slices, B},
+        pwm::{Channel, CountFallingEdge, FreeRunning, InputHighRunning, Pwm2, Slice, Slices, A},
         uart::{DataBits, StopBits, UartConfig, UartPeripheral},
         Clock, Watchdog,
+        
+        I2C,
+        pac::{I2C1}
     };
     const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
@@ -105,12 +106,12 @@ mod app {
     >;
 
     pub type EjectorServoChannel = Servo<
-        Channel<Slice<Pwm7, FreeRunning>, B>,
-        gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionPwm, gpio::PullDown>,
+        Channel<Slice<Pwm2, FreeRunning>, A>,
+        gpio::Pin<gpio::bank0::Gpio20, gpio::FunctionPwm, gpio::PullDown>
     >;
-
+    
+    type I2C1Bus = I2C<I2C1, (gpio::Pin<gpio::bank0::Gpio14, gpio::FunctionI2c, gpio::PullUp>, gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionI2c, gpio::PullUp>)>;
     static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
-
     use core::fmt::Write as CoreWrite;
 
     #[shared]
@@ -123,6 +124,8 @@ mod app {
         usb_device: UsbDevice<'static, hal::usb::UsbBus>,
         serial_console_writer: serial_handler::SerialWriter,
         clock_freq_hz: u32,
+        i2c1_bus: I2C1Bus,
+        motor_x: Motor<Channel<Slice<rp235x_hal::pwm::Pwm0, FreeRunning>, A>, gpio::Pin<gpio::bank0::Gpio16, gpio::FunctionPwm, gpio::PullDown>>
     }
 
     #[local]
@@ -178,7 +181,6 @@ mod app {
             sio.gpio_bank0,
             &mut ctx.device.RESETS,
         );
-
         // Configure GPIO25 as an output
         let mut led_pin = bank0_pins
             .gpio25
@@ -230,17 +232,25 @@ mod app {
 
         // Servo
         let pwm_slices = Slices::new(ctx.device.PWM, &mut ctx.device.RESETS);
-        let mut pwm = pwm_slices.pwm7;
+        let mut pwm = pwm_slices.pwm2;
         pwm.enable();
         pwm.set_div_int(48);
 
-        let mut channel_b = pwm.channel_b;
-        let channel_pin = channel_b.output_to(bank0_pins.gpio15);
-        let cycle = min_duty + ((max_duty - min_duty) * 90) / 200;
-        channel_b.set_duty_cycle(cycle as u16).unwrap();
-        channel_b.set_enabled(true);
+        let mut channel_a  = pwm.channel_a;
+        let channel_pin: gpio::Pin<gpio::bank0::Gpio20, gpio::FunctionPwm, gpio::PullDown> = channel_a.output_to(bank0_pins.gpio20);
+        channel_a.set_enabled(true);
 
-        let ejection_servo = Servo::new(channel_b, channel_pin);
+        let ejection_servo = Servo::new(channel_a, channel_pin);
+
+
+        let mut motor_xy_pwm = pwm_slices.pwm0;
+        motor_xy_pwm.enable();
+        motor_xy_pwm.set_top(65534/2);
+        motor_xy_pwm.set_div_int(1); 
+        let mut motor_x_channel: Channel<Slice<rp235x_hal::pwm::Pwm0, FreeRunning>, A> = motor_xy_pwm.channel_a;
+        let motor_x_channel_pin = motor_x_channel.output_to(bank0_pins.gpio16);
+        let mut motor_x = Motor::new(motor_x_channel, motor_x_channel_pin);
+        motor_x.set_speed(0);
 
         // Set up USB Device allocator
         let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
@@ -254,6 +264,17 @@ mod app {
             USB_BUS = Some(usb_bus);
         }
         let usb_bus_ref = unsafe { USB_BUS.as_ref().unwrap() };
+
+        let sda_pin = bank0_pins.gpio14.reconfigure();
+        let scl_pin = bank0_pins.gpio15.reconfigure();
+        let i2c1_bus: I2C<I2C1, (gpio::Pin<gpio::bank0::Gpio14, gpio::FunctionI2c, gpio::PullUp>, gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionI2c, gpio::PullUp>)> = I2C::i2c1(
+            ctx.device.I2C1, 
+            sda_pin, 
+            scl_pin, 
+            400.kHz(), 
+            &mut ctx.device.RESETS, 
+            &clocks.system_clock
+        );
 
         let serial = SerialPort::new(usb_bus_ref);
         let usb_dev = UsbDeviceBuilder::new(usb_bus_ref, UsbVidPid(0x16c0, 0x27dd))
@@ -269,6 +290,7 @@ mod app {
         usb_console_reader::spawn(usb_console_command_sender).ok();
         command_handler::spawn(usb_console_command_receiver).ok();
         radio_flush::spawn().ok();
+        i2c_bus_devices::spawn().ok();
 
         // Serial Writer Structure
         let serial_console_writer = serial_handler::SerialWriter::new(usb_console_line_sender);
@@ -283,8 +305,10 @@ mod app {
                 usb_serial: serial,
                 serial_console_writer,
                 clock_freq_hz: clock_freq.to_Hz(),
+                i2c1_bus: i2c1_bus,
+                motor_x: motor_x
             },
-            Local { led: led_pin },
+            Local { led: led_pin},
         )
     }
 
@@ -429,7 +453,7 @@ mod app {
     }
 
     // Command Handler
-    #[task(shared=[serial_console_writer, radio_link, clock_freq_hz, ejector_pin], priority = 2)]
+    #[task(shared=[motor_x, serial_console_writer, radio_link, clock_freq_hz, ejector_pin], priority = 2)]
     #[cfg(debug_assertions)]
     async fn command_handler(
         mut ctx: command_handler::Context,
@@ -472,6 +496,18 @@ mod app {
                         //let cycle = min_duty + ((max_duty - min_duty) * arg) / 200;
                         channel.set_angle(arg as u16);
                     });
+                }
+
+                "set-motor" => {
+                    // Parse arg as int or fail
+                    let arg = parts
+                        .next()
+                        .unwrap_or_default()
+                        .parse::<u32>()
+                        .unwrap_or_default();
+                        ctx.shared.motor_x.lock(|channel| {
+                            channel.set_speed(arg as u8);
+                        });
                 }
 
                 "packet-test" => {
@@ -556,4 +592,47 @@ mod app {
             }
         }
     }
+    #[task(shared=[i2c1_bus], priority=2)]
+    async fn i2c_bus_devices(mut ctx: i2c_bus_devices::Context){
+
+        loop{
+            ctx.shared.i2c1_bus.lock(|i2c1_bus_unlock|{
+                // // Motor EEPROM Default Values
+                i2c1_bus_unlock.write(0x2Cu8, &[1, 2, 3]).unwrap();
+                i2c1_bus_unlock.write(0x01u8, &[1, 2, 3]).unwrap(); 
+
+                // Next Line Segfaults
+                // i2c1_bus_unlock.write(0x80u8, &[0x44, 0x63, 0x8C, 0x20]).unwrap();
+
+                // Next Lines Segfault
+                // i2c1_bus_unlock.write(0x00000080u8, &[0x44, 0x63, 0x8C, 0x20]).unwrap();
+                // i2c1_bus_unlock.write(0x00000082u8, &[0x28, 0x3A, 0xF0, 0x64]).unwrap();
+                // i2c1_bus_unlock.write(0x00000084u8, &[0x0B, 0x68, 0x07, 0xD0]).unwrap();
+                // i2c1_bus_unlock.write(0x00000086u8, &[0x23, 0x06, 0x60, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x00000088u8, &[0x0C, 0x31, 0x81, 0xB0]).unwrap();
+                // i2c1_bus_unlock.write(0x0000008Au8, &[0x1A, 0xAD, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x0000008Cu8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x0000008Eu8, &[0x00, 0x00, 0x01, 0x2C]).unwrap();
+                // i2c1_bus_unlock.write(0x00000094u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x00000096u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x00000098u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x0000009Au8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x0000009Cu8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x0000009Eu8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x00000090u8, &[0x5F, 0xE8, 0x02, 0x06]).unwrap();
+                // i2c1_bus_unlock.write(0x00000092u8, &[0x74, 0x00, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x000000A4u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x000000A6u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x000000A8u8, &[0x00, 0x00, 0xB0, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x000000AAu8, &[0x40, 0x00, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x000000ACu8, &[0x00, 0x00, 0x01, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x000000AEu8, &[0x00, 0x20, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x000000EAu8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                // i2c1_bus_unlock.write(0x000000A0u8, &[0x00, 0xB3, 0x40, 0x7D]).unwrap();
+                // i2c1_bus_unlock.write(0x000000A2u8, &[0x00, 0x00, 0x01, 0xA7]).unwrap();
+            });
+            Mono::delay(100_u64.millis()).await;
+        }
+    }
+
 }
