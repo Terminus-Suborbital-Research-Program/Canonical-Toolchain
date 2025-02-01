@@ -55,7 +55,7 @@ mod app {
     };
 
     use super::*;
-    
+
     use application_layer::CommandPacket;
     use bincode::{
         config::standard,
@@ -67,12 +67,10 @@ mod app {
         serial_handler::HeaplessString,
         *,
     };
-    
-    
 
     use canonical_toolchain::{print, println};
     use embedded_hal::digital::{OutputPin, StatefulOutputPin};
-    use fugit::{ExtU32, RateExtU32};
+    use fugit::RateExtU32;
     use hal::{
         gpio::{self, FunctionSio, PullNone, SioOutput},
         sio::Sio,
@@ -286,15 +284,15 @@ mod app {
     }
 
     // Heartbeats the main led
-    #[task(local = [led], shared = [radio_link, serial_console_writer], priority = 1)]
-    async fn heartbeat(ctx: heartbeat::Context) {
+    #[task(local = [led], shared = [radio_link, serial_console_writer], priority = 2)]
+    async fn heartbeat(mut ctx: heartbeat::Context) {
+        let mut sequence_number: u8 = 0;
+        let mut connection = ConnectionTest::Start;
         loop {
             _ = ctx.local.led.toggle();
 
-            // Send a heartbeat packet
-            // let t = Mono::now().ticks();
-            // let packet = application_layer::ApplicationPacket::Info(
-            //     application_layer::InfoPacket::Heartbeat(t),
+            // let packet = application_layer::ApplicationPacket::Command(
+            //     CommandPacket::ConnectionTest(connection),
             // );
             // let link_packet = ctx
             //     .shared
@@ -302,19 +300,39 @@ mod app {
             //     .lock(|device| device.construct_packet(packet, Device::Icarus));
             // let serialized =
             //     bincode::encode_to_vec(&link_packet, bincode::config::standard()).unwrap();
+
             // ctx.shared.radio_link.lock(|device| {
             //     device.device.write(&serialized).ok();
             // });
+            // //println!(ctx, "Sent sequence");
 
-            // Clone the buffer
-            Mono::delay(500_u64.millis()).await;
+            // // Update the connection test sequence
+            // connection = match connection {
+            //     ConnectionTest::Start => {
+            //         sequence_number = 0;
+            //         ConnectionTest::Sequence(sequence_number)
+            //     }
+
+            //     ConnectionTest::Sequence(_) => {
+            //         if sequence_number == 255 {
+            //             ConnectionTest::End
+            //         } else {
+            //             sequence_number += 1;
+            //             ConnectionTest::Sequence(sequence_number)
+            //         }
+            //     }
+
+            //     ConnectionTest::End => ConnectionTest::Start,
+            // };
+
+            Mono::delay(300_u64.millis()).await;
         }
     }
 
     // Takes care of receiving incoming packets
     #[task(shared = [radio_link, serial_console_writer], priority = 1)]
     async fn incoming_packet_handler(mut ctx: incoming_packet_handler::Context) {
-        let mut connection_test_sequence: u8 = 0;
+        let mut connection_test_sequence: u16 = 0;
         let mut connection_test_start = Mono::now();
         loop {
             let buffer = ctx
@@ -336,6 +354,11 @@ mod app {
                         // Clear the buffer
                         ctx.shared.radio_link.lock(|radio| radio.device.clear());
                     }
+
+                    #[allow(unused_variables)]
+                    DecodeError::UnexpectedEnd { additional } => {
+                        // Nothing to do here
+                    }
                     _ => {
                         let mut buffer = alloc::string::String::new();
                         write!(buffer, "Error decoding packet: {:#?}", e).ok();
@@ -354,6 +377,25 @@ mod app {
                     ctx.shared
                         .radio_link
                         .lock(|radio| radio.device.drop_bytes(read));
+
+                    // Uncomment the below if you think you made a mistake in handling
+
+                    // let mut buffer_heapless_stirng: alloc::string::String =
+                    //     alloc::string::String::new();
+                    // write!(buffer_heapless_stirng, "{:#?}", packet).ok();
+                    // for char in buffer_heapless_stirng.chars() {
+                    //     print!(ctx, "{}", char);
+                    //     Mono::delay(1_u64.millis()).await;
+                    // }
+                    // println!(ctx, "\n");
+
+                    // Check the checksum, if it fails, the packet is bad, we should continue
+                    // and clear the buffer
+                    if !packet.verify_checksum() {
+                        ctx.shared.radio_link.lock(|radio| radio.device.clear());
+                        println!(ctx, "Bad Packet, checksum failure");
+                        continue;
+                    }
 
                     match packet.payload {
                         LinkLayerPayload::Payload(app_packet) => match app_packet {
@@ -515,7 +557,7 @@ mod app {
     }
 
     // Radio Flush Task
-    #[task(shared = [radio_link], priority = 2)]
+    #[task(shared = [radio_link], priority = 1)]
     async fn radio_flush(mut ctx: radio_flush::Context) {
         let mut on_board_baudrate: BaudRate = BaudRate::B9600;
         let bytes_to_flush = 16;
@@ -723,6 +765,53 @@ mod app {
                             }
                         },
                     }
+                }
+
+                // Tests the hash of a linkpacket
+                "packet-hash-test" => {
+                    // Two identical packets should have the same hash
+                    let mut packet = LinkPacket {
+                        from_device: Device::Atmega,
+                        to_device: Device::Atmega,
+                        route_through: None,
+                        payload: LinkLayerPayload::NODATA,
+                        checksum: None,
+                    };
+
+                    let mut packet2 = LinkPacket {
+                        from_device: Device::Atmega,
+                        to_device: Device::Atmega,
+                        route_through: None,
+                        payload: LinkLayerPayload::NODATA,
+                        checksum: None,
+                    };
+
+                    packet.set_checksum();
+                    packet2.set_checksum();
+
+                    println!(ctx, "Packet 1: {:?}", packet);
+                    println!(ctx, "Packet 2: {:?}", packet2);
+                    Mono::delay(1000_u64.millis()).await;
+                    println!(
+                        ctx,
+                        "{}, {}",
+                        packet.checksum.unwrap(),
+                        packet2.checksum.unwrap()
+                    );
+
+                    // Change a field and the hash should change
+                    packet2.from_device = Device::Pi;
+                    packet2.set_checksum();
+
+                    println!(ctx, "Packet 1: {:?}", packet);
+                    println!(ctx, "Packet 2: {:?}", packet2);
+                    Mono::delay(1000_u64.millis()).await;
+                    println!(
+                        ctx,
+                        "{}, {}",
+                        packet.checksum.unwrap(),
+                        packet2.checksum.unwrap()
+                    );
                 }
 
                 // Peeks at the buffer, but with hex

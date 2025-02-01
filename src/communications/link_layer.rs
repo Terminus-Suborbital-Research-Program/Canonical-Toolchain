@@ -99,13 +99,17 @@ impl<D> LinkLayerDevice<D> {
     }
 
     pub fn construct_packet(&self, packload: ApplicationPacket, to: Device) -> LinkPacket {
-        LinkPacket {
+        let mut packet = LinkPacket {
             from_device: self.me,
             to_device: to,
             route_through: None,
             payload: LinkLayerPayload::Payload(packload),
             checksum: None,
-        }
+        };
+
+        packet.set_checksum();
+
+        packet
     }
 }
 
