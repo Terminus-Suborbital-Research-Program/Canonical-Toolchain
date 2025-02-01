@@ -130,9 +130,6 @@ where
     D: Read,
 {
     pub fn read_link_packet(&mut self) -> Result<LinkPacket, DecodeError> {
-        let mut slice = [0u8; 128];
-        let read = self.device.read(&mut slice).unwrap();
-        let packet = bincode::decode_from_slice(&slice[..read], standard())?;
-        Ok(packet.0)
+        todo!();
     }
 }

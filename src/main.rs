@@ -48,14 +48,25 @@ mod app {
             EjectionServo, EjectionServoMosfet, LockingServo, LockingServoMosfet, Servo,
             LOCKING_SERVO_LOCKED,
         },
-        communications::link_layer::Device,
+        communications::{
+            hc12::{UART1Bus, GPIO10},
+            link_layer::{Device, LinkPacket},
+        },
     };
 
     use super::*;
     use actuators::*;
     use application_layer::{CommandPacket, ScientificPacket};
-    use bincode::error::DecodeError::UnexpectedVariant;
-    use communications::{link_layer::LinkLayerDevice, serial_handler::HeaplessString, *};
+    use bincode::{
+        config::standard,
+        error::DecodeError::{self, UnexpectedVariant},
+    };
+    use communications::{
+        application_layer::ConnectionTest,
+        link_layer::{LinkLayerDevice, LinkLayerPayload},
+        serial_handler::HeaplessString,
+        *,
+    };
     use sensors::*;
     use utilities::*;
 
@@ -97,16 +108,6 @@ mod app {
         ),
     >;
 
-    pub type GPIO7 = gpio::Pin<hal::gpio::bank0::Gpio7, gpio::FunctionSioOutput, gpio::PullDown>;
-    pub type UART1Bus = UartPeripheral<
-        rp235x_hal::uart::Enabled,
-        rp235x_hal::pac::UART1,
-        (
-            gpio::Pin<gpio::bank0::Gpio8, gpio::FunctionUart, gpio::PullDown>,
-            gpio::Pin<gpio::bank0::Gpio9, gpio::FunctionUart, gpio::PullDown>,
-        ),
-    >;
-
     static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
 
     use core::fmt::Write as CoreWrite;
@@ -117,7 +118,7 @@ mod app {
         //uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>,
         ejector_driver: EjectionServo,
         locking_driver: LockingServo,
-        radio_link: LinkLayerDevice<HC12<UART1Bus, GPIO7>>,
+        radio_link: LinkLayerDevice<HC12<UART1Bus, GPIO10>>,
         usb_serial: SerialPort<'static, hal::usb::UsbBus>,
         usb_device: UsbDevice<'static, hal::usb::UsbBus>,
         serial_console_writer: serial_handler::SerialWriter,
@@ -190,21 +191,6 @@ mod app {
         // Get clock frequency
         let clock_freq = clocks.peripheral_clock.freq();
 
-        // Pin setup for UART0
-        // let uart0_pins = (
-        //     bank0_pins.gpio0.into_function(),
-        //     bank0_pins.gpio1.into_function(),
-        // );
-        // let mut uart0_peripheral =
-        //     UartPeripheral::new(ctx.device.UART0, uart0_pins, &mut ctx.device.RESETS)
-        //         .enable(
-        //             UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
-        //             clocks.peripheral_clock.freq(),
-        //         )
-        //         .unwrap();
-        // uart0_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
-        //let uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH> = heapless::String::new(); // Allocate uart0_buffer
-
         // Pin setup for UART1
         let uart1_pins = (
             bank0_pins.gpio8.into_function(),
@@ -219,8 +205,8 @@ mod app {
                 .unwrap();
         uart1_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
 
-        // Use pin 4 (GPIO2) as the HC12 configuration pin
-        let hc12_configure_pin = bank0_pins.gpio7.into_push_pull_output();
+        // Use pin 14 (GPIO10) as the HC12 configuration pin
+        let hc12_configure_pin = bank0_pins.gpio10.into_push_pull_output();
         let hc12 = HC12::new(uart1_peripheral, hc12_configure_pin).unwrap();
         let radio_link = LinkLayerDevice {
             device: hc12,
@@ -281,6 +267,7 @@ mod app {
         usb_console_reader::spawn(usb_console_command_sender).ok();
         command_handler::spawn(usb_console_command_receiver).ok();
         radio_flush::spawn().ok();
+        incoming_packet_handler::spawn().ok();
 
         // Serial Writer Structure
         let serial_console_writer = serial_handler::SerialWriter::new(usb_console_line_sender);
@@ -302,17 +289,132 @@ mod app {
     }
 
     // Heartbeats the main led
-    #[task(local = [led], priority = 1)]
+    #[task(local = [led], shared = [radio_link, serial_console_writer], priority = 1)]
     async fn heartbeat(ctx: heartbeat::Context) {
         loop {
             _ = ctx.local.led.toggle();
 
+            // Send a heartbeat packet
+            // let t = Mono::now().ticks();
+            // let packet = application_layer::ApplicationPacket::Info(
+            //     application_layer::InfoPacket::Heartbeat(t),
+            // );
+            // let link_packet = ctx
+            //     .shared
+            //     .radio_link
+            //     .lock(|device| device.construct_packet(packet, Device::Icarus));
+            // let serialized =
+            //     bincode::encode_to_vec(&link_packet, bincode::config::standard()).unwrap();
+            // ctx.shared.radio_link.lock(|device| {
+            //     device.device.write(&serialized).ok();
+            // });
+
+            // Clone the buffer
             Mono::delay(500_u64.millis()).await;
         }
     }
 
+    // Takes care of receiving incoming packets
+    #[task(shared = [radio_link, serial_console_writer], priority = 1)]
+    async fn incoming_packet_handler(mut ctx: incoming_packet_handler::Context) {
+        let mut connection_test_sequence: u8 = 0;
+        let mut connection_test_start = Mono::now();
+        loop {
+            let buffer = ctx
+                .shared
+                .radio_link
+                .lock(|radio| radio.device.clone_buffer());
+
+            let decode: Result<(LinkPacket, usize), bincode::error::DecodeError> =
+                bincode::decode_from_slice(&buffer, standard());
+
+            match decode {
+                Err(e) => match e {
+                    #[allow(unused_variables)]
+                    DecodeError::UnexpectedVariant {
+                        type_name,
+                        allowed,
+                        found,
+                    } => {
+                        // Clear the buffer
+                        ctx.shared.radio_link.lock(|radio| radio.device.clear());
+                    }
+                    _ => {
+                        let mut buffer = alloc::string::String::new();
+                        write!(buffer, "Error decoding packet: {:#?}", e).ok();
+                        for c in buffer.chars() {
+                            print!(ctx, "{}", c);
+                            Mono::delay(1_u64.millis()).await;
+                        }
+                        println!(ctx, "");
+                    }
+                },
+
+                Ok(packet_wrapper) => {
+                    let packet = packet_wrapper.0;
+                    let read = packet_wrapper.1;
+                    // Drop the read bytes
+                    ctx.shared
+                        .radio_link
+                        .lock(|radio| radio.device.drop_bytes(read));
+
+                    match packet.payload {
+                        LinkLayerPayload::Payload(app_packet) => match app_packet {
+                            application_layer::ApplicationPacket::Command(command) => match command
+                            {
+                                // Connection test sequence
+                                CommandPacket::ConnectionTest(connection) => match connection {
+                                    ConnectionTest::Start => {
+                                        connection_test_sequence = 0;
+                                        connection_test_start = Mono::now();
+                                    }
+
+                                    ConnectionTest::Sequence(seq) => {
+                                        connection_test_sequence += 1;
+                                        println!(ctx, "Received Connection Test Sequence: {}", seq);
+                                    }
+
+                                    ConnectionTest::End => {
+                                        println!(ctx, "Received Connection Test End");
+
+                                        let percentage_recieved =
+                                            (connection_test_sequence as f32 / 255.0) * 100.0;
+                                        println!(
+                                            ctx,
+                                            "Received {}% of the connection test sequence",
+                                            percentage_recieved
+                                        );
+
+                                        let elapsed = Mono::now() - connection_test_start;
+                                        println!(ctx, "Elapsed Time: {}ms", elapsed.to_millis());
+                                    }
+                                },
+                                _ => {}
+                            },
+
+                            _ => {
+                                let mut buffer_heapless_stirng: alloc::string::String =
+                                    alloc::string::String::new();
+                                write!(buffer_heapless_stirng, "{:#?}", packet).ok();
+                                for char in buffer_heapless_stirng.chars() {
+                                    print!(ctx, "{}", char);
+                                    Mono::delay(1_u64.millis()).await;
+                                }
+                                println!(ctx, "\n");
+                            }
+                        },
+
+                        _ => {}
+                    }
+                }
+            }
+
+            Mono::delay(100_u64.millis()).await;
+        }
+    }
+
     // Updates the radio module on the serial interrupt
-    #[task(binds = UART0_IRQ, shared = [radio_link, serial_console_writer])]
+    #[task(binds = UART1_IRQ, shared = [radio_link, serial_console_writer])]
     fn uart_interrupt(mut ctx: uart_interrupt::Context) {
         ctx.shared.radio_link.lock(|radio| {
             radio.device.update().ok();
@@ -452,6 +554,9 @@ mod app {
             MAX_USB_LINES,
         >,
     ) {
+        use embedded_io::{Read as _, ReadReady as _};
+        use heapless::String;
+
         while let Ok(line) = reciever.recv().await {
             // Split into commands and arguments, on whitespace
             let mut parts = line.split_whitespace();
@@ -525,6 +630,52 @@ mod app {
                     });
                 }
 
+                "link-loopback-test" => {
+                    // Create a command packet
+                    let packet = application_layer::ApplicationPacket::Command(
+                        CommandPacket::MoveServoDegrees(90),
+                    );
+                    let link_packet = ctx
+                        .shared
+                        .radio_link
+                        .lock(|device| device.construct_packet(packet, Device::Icarus));
+
+                    let serialized =
+                        bincode::encode_to_vec(&link_packet, bincode::config::standard()).unwrap();
+
+                    for byte in serialized.iter() {
+                        print!(ctx, "{:02X} ", byte);
+                        Mono::delay(100_u64.millis()).await;
+                    }
+                    println!(ctx, "");
+
+                    ctx.shared.radio_link.lock(|device| {
+                        device.device.write(&serialized).ok();
+                    });
+
+                    println!(ctx, "Sent Packet, waiting");
+
+                    Mono::delay(1000_u64.millis()).await;
+
+                    let packet = ctx.shared.radio_link.lock(|radio| radio.read_link_packet());
+
+                    match packet {
+                        Ok(packet) => {
+                            println!(ctx, "Received Packet:");
+                            let mut buffer_heapless_stirng: String<128> = HeaplessString::new();
+                            write!(buffer_heapless_stirng, "{:?}", packet).ok();
+                            for char in buffer_heapless_stirng.chars() {
+                                print!(ctx, "{}", char);
+                            }
+                            println!(ctx, "");
+                        }
+
+                        Err(e) => {
+                            println!(ctx, "Error receiving packet: {:?}", e);
+                        }
+                    }
+                }
+
                 "packet-test" => {
                     // Create a command packet
                     let packet = CommandPacket::MoveServoDegrees(90);
@@ -577,11 +728,93 @@ mod app {
                     }
                 }
 
+                // Peeks at the buffer, but with hex
+                "link-peek-hex" => {
+                    let buffer = ctx
+                        .shared
+                        .radio_link
+                        .lock(|radio| radio.device.clone_buffer());
+
+                    for c in buffer.iter() {
+                        print!(ctx, "{:02X} ", *c);
+                        Mono::delay(10_u64.millis()).await;
+                    }
+                    println!(ctx, "");
+                }
+
                 // Peeks at the buffer, printing it to the console
                 "link-peek" => {
-                    ctx.shared.radio_link.lock(|radio| {
-                        let buffer = radio.device.clone_buffer();
-                        println!(ctx, "Radio Buffer: {}", buffer);
+                    let buffer = ctx
+                        .shared
+                        .radio_link
+                        .lock(|radio| radio.device.clone_buffer());
+
+                    for c in buffer.iter() {
+                        print!(ctx, "{}", *c as char);
+                        Mono::delay(10_u64.millis()).await;
+                    }
+                    println!(ctx, "");
+                }
+
+                // HC12 Configuration Utility
+                "hc-configure" => {
+                    // Clear out the buffer, the HC12 often sends a bit of junk when
+                    // it goes into config mode
+                    ctx.shared.radio_link.lock(|link| {
+                        link.device.clear();
+                        link.device.write("AT\n".as_bytes()).ok();
+                    });
+
+                    Mono::delay(500_u64.millis()).await;
+                    ctx.shared.radio_link.lock(|link| {
+                        link.device.update().ok();
+                        while link.device.read_ready().unwrap_or(false) {
+                            let mut buffer = [0u8; 1];
+                            link.device.read(&mut buffer).ok();
+                            print!(ctx, "{}", buffer[0] as char);
+                        }
+                    });
+
+                    // Set baudrate
+                    ctx.shared.radio_link.lock(|link| {
+                        link.device.write("AT+B9600\n".as_bytes()).ok();
+                    });
+                    Mono::delay(500_u64.millis()).await;
+                    ctx.shared.radio_link.lock(|link| {
+                        link.device.update().ok();
+                        while link.device.read_ready().unwrap_or(false) {
+                            let mut buffer = [0u8; 1];
+                            link.device.read(&mut buffer).ok();
+                            print!(ctx, "{}", buffer[0] as char);
+                        }
+                    });
+
+                    // Set channel (100)
+                    ctx.shared.radio_link.lock(|link| {
+                        link.device.write("AT+C100\n".as_bytes()).ok();
+                    });
+                    Mono::delay(500_u64.millis()).await;
+                    ctx.shared.radio_link.lock(|link| {
+                        link.device.update().ok();
+                        while link.device.read_ready().unwrap_or(false) {
+                            let mut buffer = [0u8; 1];
+                            link.device.read(&mut buffer).ok();
+                            print!(ctx, "{}", buffer[0] as char);
+                        }
+                    });
+
+                    // Set power to max (8)
+                    ctx.shared.radio_link.lock(|link| {
+                        link.device.write("AT+P8\n".as_bytes()).ok();
+                    });
+                    Mono::delay(500_u64.millis()).await;
+                    ctx.shared.radio_link.lock(|link| {
+                        link.device.update().ok();
+                        while link.device.read_ready().unwrap_or(false) {
+                            let mut buffer = [0u8; 1];
+                            link.device.read(&mut buffer).ok();
+                            print!(ctx, "{}", buffer[0] as char);
+                        }
                     });
                 }
 

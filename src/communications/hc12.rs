@@ -1,12 +1,25 @@
+use alloc::borrow::ToOwned;
 use core::fmt::{self, Write as FmtWrite};
 use defmt::todo;
 use embedded_hal::digital::OutputPin;
 use embedded_io::{Read, ReadReady, Write, WriteReady};
 use fugit::{HertzU32, RateExtU32};
-use heapless::{Deque, String as HString};
-use rp235x_hal::uart::{
-    DataBits, Enabled, StopBits, UartConfig, UartDevice, UartPeripheral, ValidUartPinout,
+use heapless::{Deque, String as HString, Vec};
+use rp235x_hal::{
+    gpio,
+    uart::{DataBits, Enabled, StopBits, UartConfig, UartDevice, UartPeripheral, ValidUartPinout},
 };
+
+// UART Type
+pub type GPIO10 = gpio::Pin<gpio::bank0::Gpio10, gpio::FunctionSioOutput, gpio::PullDown>;
+pub type UART1Bus = UartPeripheral<
+    rp235x_hal::uart::Enabled,
+    rp235x_hal::pac::UART1,
+    (
+        gpio::Pin<gpio::bank0::Gpio8, gpio::FunctionUart, gpio::PullDown>,
+        gpio::Pin<gpio::bank0::Gpio9, gpio::FunctionUart, gpio::PullDown>,
+    ),
+>;
 
 // Clock frequency of the RP235x is 150_000_000Hz
 const CLOCK_FREQ: u32 = 150_000_000;
@@ -170,13 +183,15 @@ impl<Uart, ConfigPin> HC12<Uart, ConfigPin> {
     }
 
     // Clones the buffer as a string
-    pub fn clone_buffer(&self) -> HString<128> {
-        let mut buffer = HString::<128>::new();
-        for c in self.incoming_buffer.iter() {
-            buffer.push(*c as char).ok();
-        }
+    pub fn clone_buffer(&self) -> Vec<u8, 128> {
+        self.incoming_buffer.clone().iter().cloned().collect()
+    }
 
-        buffer
+    // Drops n bytes from the front of the buffer
+    pub fn drop_bytes(&mut self, n: usize) {
+        for _ in 0..n {
+            self.incoming_buffer.pop_front();
+        }
     }
 
     // Checks if the incoming buffer contains "OK"
@@ -419,9 +434,16 @@ where
         while uart.read_ready().unwrap_or(false) {
             let mut buff = [0u8; 1];
             uart.read(&mut buff).map_err(|_| HC12Error::ReadError)?;
-            self.incoming_buffer
-                .push_back(buff[0])
-                .map_err(|_| HC12Error::BufferFull)?;
+            match self.incoming_buffer.push_back(buff[0]) {
+                Ok(_) => (),
+                Err(_) => {
+                    // Popp off the first byte if the buffer is full, and push the new byte
+                    self.incoming_buffer.pop_front();
+                    self.incoming_buffer
+                        .push_back(buff[0])
+                        .map_err(|_| HC12Error::BufferFull)?;
+                }
+            }
         }
 
         Ok(())
