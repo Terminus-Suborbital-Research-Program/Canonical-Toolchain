@@ -10,6 +10,20 @@ pub struct ScientificPacket {
 pub enum CommandPacket {
     SyncTime(u32),
     MoveServoDegrees(i32),
+    EchoMessage(u8),
+    ConnectionTest(ConnectionTest),
+}
+
+#[derive(Debug, Clone, Copy, Encode, Decode)]
+pub enum InfoPacket {
+    Heartbeat(u64),
+}
+
+#[derive(Debug, Clone, Copy, Encode, Decode, PartialEq, Eq, Hash)]
+pub enum ConnectionTest {
+    Start,
+    Sequence(u8),
+    End,
 }
 
 #[derive(Debug, Clone, Copy, Encode, Decode)]
@@ -22,4 +36,5 @@ pub enum ApplicationPacket {
     Scientific(ScientificPacket),
     Command(CommandPacket),
     Telemetry(TelemetryPacket),
+    Info(InfoPacket),
 }

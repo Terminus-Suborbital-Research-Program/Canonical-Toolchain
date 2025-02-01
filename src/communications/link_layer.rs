@@ -1,14 +1,13 @@
 use bincode::{
     config::standard,
-    de::read::Reader,
     enc::write::Writer,
     encode_into_slice,
     error::{DecodeError, EncodeError},
     Decode, Encode,
 };
-use embedded_io::{Read, ReadReady, Write, WriteReady};
+use embedded_io::{Read, Write};
 
-use super::{application_layer::ApplicationPacket, hc12::HC12};
+use super::application_layer::ApplicationPacket;
 
 #[derive(Debug, Clone, Copy, Encode, Decode)]
 #[allow(non_camel_case_types)]
@@ -100,13 +99,17 @@ impl<D> LinkLayerDevice<D> {
     }
 
     pub fn construct_packet(&self, packload: ApplicationPacket, to: Device) -> LinkPacket {
-        LinkPacket {
+        let mut packet = LinkPacket {
             from_device: self.me,
             to_device: to,
             route_through: None,
             payload: LinkLayerPayload::Payload(packload),
             checksum: None,
-        }
+        };
+
+        packet.set_checksum();
+
+        packet
     }
 }
 
@@ -130,9 +133,6 @@ where
     D: Read,
 {
     pub fn read_link_packet(&mut self) -> Result<LinkPacket, DecodeError> {
-        let mut slice = [0u8; 128];
-        let read = self.device.read(&mut slice).unwrap();
-        let packet = bincode::decode_from_slice(&slice[..read], standard())?;
-        Ok(packet.0)
+        todo!();
     }
 }
