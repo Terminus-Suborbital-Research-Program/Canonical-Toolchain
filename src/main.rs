@@ -284,46 +284,10 @@ mod app {
     }
 
     // Heartbeats the main led
-    #[task(local = [led], shared = [radio_link, serial_console_writer], priority = 2)]
-    async fn heartbeat(mut ctx: heartbeat::Context) {
-        let mut sequence_number: u8 = 0;
-        let mut connection = ConnectionTest::Start;
+    #[task(local = [led], priority = 2)]
+    async fn heartbeat(ctx: heartbeat::Context) {
         loop {
             _ = ctx.local.led.toggle();
-
-            // let packet = application_layer::ApplicationPacket::Command(
-            //     CommandPacket::ConnectionTest(connection),
-            // );
-            // let link_packet = ctx
-            //     .shared
-            //     .radio_link
-            //     .lock(|device| device.construct_packet(packet, Device::Icarus));
-            // let serialized =
-            //     bincode::encode_to_vec(&link_packet, bincode::config::standard()).unwrap();
-
-            // ctx.shared.radio_link.lock(|device| {
-            //     device.device.write(&serialized).ok();
-            // });
-            // //println!(ctx, "Sent sequence");
-
-            // // Update the connection test sequence
-            // connection = match connection {
-            //     ConnectionTest::Start => {
-            //         sequence_number = 0;
-            //         ConnectionTest::Sequence(sequence_number)
-            //     }
-
-            //     ConnectionTest::Sequence(_) => {
-            //         if sequence_number == 255 {
-            //             ConnectionTest::End
-            //         } else {
-            //             sequence_number += 1;
-            //             ConnectionTest::Sequence(sequence_number)
-            //         }
-            //     }
-
-            //     ConnectionTest::End => ConnectionTest::Start,
-            // };
 
             Mono::delay(300_u64.millis()).await;
         }
@@ -712,6 +676,54 @@ mod app {
                         Err(e) => {
                             println!(ctx, "Error receiving packet: {:?}", e);
                         }
+                    }
+                }
+
+                "transmit-test" => {
+                    let mut sequence_number: u8 = 0;
+                    let mut connection = ConnectionTest::Start;
+
+                    loop {
+                        let packet = application_layer::ApplicationPacket::Command(
+                            CommandPacket::ConnectionTest(connection),
+                        );
+                        let link_packet = ctx
+                            .shared
+                            .radio_link
+                            .lock(|device| device.construct_packet(packet, Device::Icarus));
+                        let serialized =
+                            bincode::encode_to_vec(&link_packet, bincode::config::standard())
+                                .unwrap();
+
+                        if connection == ConnectionTest::End {
+                            break;
+                        }
+
+                        ctx.shared.radio_link.lock(|device| {
+                            device.device.write(&serialized).ok();
+                        });
+                        //println!(ctx, "Sent sequence");
+
+                        // Update the connection test sequence
+                        connection = match connection {
+                            ConnectionTest::Start => {
+                                sequence_number = 0;
+                                ConnectionTest::Sequence(sequence_number)
+                            }
+
+                            ConnectionTest::Sequence(_) => {
+                                if sequence_number == 255 {
+                                    ConnectionTest::End
+                                } else {
+                                    sequence_number += 1;
+                                    ConnectionTest::Sequence(sequence_number)
+                                }
+                            }
+
+                            ConnectionTest::End => ConnectionTest::Start,
+                        };
+
+                        Mono::delay(300_u64.millis()).await;
                     }
                 }
 
