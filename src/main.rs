@@ -598,8 +598,8 @@ mod app {
         loop{
             ctx.shared.i2c1_bus.lock(|i2c1_bus_unlock|{
                 // // Motor EEPROM Default Values
-                i2c1_bus_unlock.write(0x2Cu8, &[1, 2, 3]).unwrap();
-                i2c1_bus_unlock.write(0x01u8, &[1, 2, 3]).unwrap(); 
+                i2c1_bus_unlock.write(0x0u8, &[1, 2, 3]).ok();
+                i2c1_bus_unlock.write(0x0u8, &[1, 2, 3]).ok();
 
                 // Next Line Segfaults
                 // i2c1_bus_unlock.write(0x80u8, &[0x44, 0x63, 0x8C, 0x20]).unwrap();
