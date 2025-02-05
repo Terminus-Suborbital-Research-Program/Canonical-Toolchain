@@ -738,7 +738,7 @@ mod app {
                             }
                         };
 
-                        Mono::delay(300_u64.millis()).await;
+                        Mono::delay(200_u64.millis()).await;
                     }
                 }
 
