@@ -43,20 +43,23 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
     dispatchers = [PIO2_IRQ_0, PIO2_IRQ_1, DMA_IRQ_0],
 )]
 mod app {
+    use core::fmt::Error;
+
     use crate::{actuators::{servo::Servo, motor::Motor}, communications::link_layer::Device};
 
     use super::*;
     use actuators::*;
     use application_layer::{CommandPacket, ScientificPacket};
     use bincode::error::DecodeError::UnexpectedVariant;
+    use bmi323::{Bmi323, AccelConfig, GyroConfig, OutputDataRate, AccelerometerRange, GyroscopeRange};
     use communications::{link_layer::LinkLayerDevice, serial_handler::HeaplessString, *};
-    use rtic_monotonics::rtic_time::timer_queue::Delay;
+    use rtic_monotonics::rtic_time::{embedded_hal_async::delay::DelayNs, timer_queue::Delay};
     use sensors::*;
     use utilities::*;
 
     use canonical_toolchain::{print, println};
     use embedded_hal::{
-        digital::{OutputPin, StatefulOutputPin}, i2c::{self, I2c}, pwm::SetDutyCycle
+        delay, digital::{OutputPin, StatefulOutputPin}, i2c::{self, I2c}, pwm::SetDutyCycle
     };
     
     use fugit::{ExtU32, RateExtU32};
@@ -69,9 +72,8 @@ mod app {
         pwm::{Channel, CountFallingEdge, FreeRunning, InputHighRunning, Pwm2, Slice, Slices, A},
         uart::{DataBits, StopBits, UartConfig, UartPeripheral},
         Clock, Watchdog,
-        
         I2C,
-        pac::{I2C1}
+        pac::{I2C1},
     };
     const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
@@ -112,7 +114,6 @@ mod app {
     
     type I2C1Bus = I2C<I2C1, (gpio::Pin<gpio::bank0::Gpio14, gpio::FunctionI2c, gpio::PullUp>, gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionI2c, gpio::PullUp>)>;
     static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
-    use core::fmt::Write as CoreWrite;
 
     #[shared]
     struct Shared {
@@ -124,7 +125,7 @@ mod app {
         usb_device: UsbDevice<'static, hal::usb::UsbBus>,
         serial_console_writer: serial_handler::SerialWriter,
         clock_freq_hz: u32,
-        i2c1_bus: I2C1Bus,
+        i2c1_bus: I2C<I2C1, (gpio::Pin<gpio::bank0::Gpio14, gpio::FunctionI2c, gpio::PullUp>, gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionI2c, gpio::PullUp>)>,
         motor_x: Motor<Channel<Slice<rp235x_hal::pwm::Pwm0, FreeRunning>, A>, gpio::Pin<gpio::bank0::Gpio16, gpio::FunctionPwm, gpio::PullDown>>
     }
 
@@ -267,7 +268,7 @@ mod app {
 
         let sda_pin = bank0_pins.gpio14.reconfigure();
         let scl_pin = bank0_pins.gpio15.reconfigure();
-        let i2c1_bus: I2C<I2C1, (gpio::Pin<gpio::bank0::Gpio14, gpio::FunctionI2c, gpio::PullUp>, gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionI2c, gpio::PullUp>)> = I2C::i2c1(
+        let mut i2c1_bus: I2C<I2C1, (gpio::Pin<gpio::bank0::Gpio14, gpio::FunctionI2c, gpio::PullUp>, gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionI2c, gpio::PullUp>)> = I2C::i2c1(
             ctx.device.I2C1, 
             sda_pin, 
             scl_pin, 
@@ -276,7 +277,28 @@ mod app {
             &clocks.system_clock
         );
 
-        let serial = SerialPort::new(usb_bus_ref);
+        i2c1_bus.write(0x2Cu8, &[1, 2, 3]).unwrap();
+
+        // let mut imu: Bmi323<bmi323::interface::I2cInterface<I2C<I2C1, (gpio::Pin<gpio::bank0::Gpio14, gpio::FunctionI2c, gpio::PullUp>, gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionI2c, gpio::PullUp>)>>, Mono> = Bmi323::new_with_i2c(i2c1_bus, 0x68, Mono);
+        // let accel_config = AccelConfig::builder()
+        //     .odr(OutputDataRate::Odr100hz)
+        //     .range(AccelerometerRange::G16)
+        //     .bw(bmi323::Bandwidth::OdrQuarter) // ODR/4
+        //     .avg_num(bmi323::AverageNum::Avg1)
+        //     .mode(bmi323::AccelerometerPowerMode::Normal)
+        //     .build();
+
+        // let gyro_config = GyroConfig::builder()
+        //     .odr(OutputDataRate::Odr100hz)
+        //     .range(GyroscopeRange::DPS2000)
+        //     .bw(bmi323::Bandwidth::OdrHalf) // ODR/2
+        //     .avg_num(bmi323::AverageNum::Avg1)
+        //     .mode(bmi323::GyroscopePowerMode::Normal)
+        //     .build();
+        // imu.set_accel_config(accel_config);
+        // imu.set_gyro_config(gyro_config);
+
+        let serial: SerialPort<'_, rp235x_hal::usb::UsbBus> = SerialPort::new(usb_bus_ref);
         let usb_dev = UsbDeviceBuilder::new(usb_bus_ref, UsbVidPid(0x16c0, 0x27dd))
             .strings(&[StringDescriptors::default()
                 .manufacturer("UAH TERMINUS PROGRAM")
@@ -305,8 +327,8 @@ mod app {
                 usb_serial: serial,
                 serial_console_writer,
                 clock_freq_hz: clock_freq.to_Hz(),
-                i2c1_bus: i2c1_bus,
-                motor_x: motor_x
+                motor_x: motor_x,
+                i2c1_bus: i2c1_bus
             },
             Local { led: led_pin},
         )
@@ -323,7 +345,7 @@ mod app {
     }
 
     // Updates the radio module on the serial interrupt
-    #[task(binds = UART0_IRQ, shared = [radio_link, serial_console_writer])]
+    #[task(binds = UART1_IRQ, shared = [radio_link, serial_console_writer])]
     fn uart_interrupt(mut ctx: uart_interrupt::Context) {
         ctx.shared.radio_link.lock(|radio| {
             radio.device.update().ok();
@@ -592,47 +614,71 @@ mod app {
             }
         }
     }
-    #[task(shared=[i2c1_bus], priority=2)]
+    #[task(shared=[i2c1_bus, uart0, uart0_buffer], priority=2)]
     async fn i2c_bus_devices(mut ctx: i2c_bus_devices::Context){
+            // // Motor EEPROM Default Values
+            loop{
+                ctx.shared.i2c1_bus.lock(|i2c1_bus_unlock|{
+                    ctx.shared.uart0.lock(|uart0_unlock|{
+                        uart0_unlock.write_full_blocking(b"Start Read\n");
+                        let mut read_data = [0; 32];
+                        for addr in 0..(1 << 7){
+                            if (addr % 16 == 0){
+                                uart0_unlock.write_fmt(format_args!("{:#04x?} ", addr));
+                            }
+                            let ret = 0;
 
-        loop{
-            ctx.shared.i2c1_bus.lock(|i2c1_bus_unlock|{
-                // // Motor EEPROM Default Values
-                i2c1_bus_unlock.write(0x0u8, &[1, 2, 3]).ok();
-                i2c1_bus_unlock.write(0x0u8, &[1, 2, 3]).ok();
+                            // let i2c_result= i2c1_bus_unlock.read(addr as u8, &mut read_data);
+                            // let i2c_value = match i2c_result{
+                            //     Ok(value)=>{
+                            //         if value < 0 {
+                            //             uart0_unlock.write_fmt(format_args!("@"));
+                            //         }
+                            //         else{
+                            //             uart0_unlock.write_fmt(format_args!("."));
+                            //         }
+                            //         if addr % 16 == 15{
+                            //             uart0_unlock.write_fmt(format_args!("\n"));
+                            //         }
+                            //     }
+                            //     _=>{
+                            //         // uart0_unlock.write_fmt(format_args!("Error: {:?}\n", i2c_result.err()));
+                            //     }
+                            // };
+                        }
+                        uart0_unlock.write_fmt(format_args!("Done"));
+                    });
+                });
+            }
+            // Mono::delay(2000_u64.millis()).await;
+            // Next Line Segfaults
+                    // i2c1_bus_unlock.write(0x00u8, &[0, 1, 2]).unwrap();
 
-                // Next Line Segfaults
-                // i2c1_bus_unlock.write(0x80u8, &[0x44, 0x63, 0x8C, 0x20]).unwrap();
-
-                // Next Lines Segfault
-                // i2c1_bus_unlock.write(0x00000080u8, &[0x44, 0x63, 0x8C, 0x20]).unwrap();
-                // i2c1_bus_unlock.write(0x00000082u8, &[0x28, 0x3A, 0xF0, 0x64]).unwrap();
-                // i2c1_bus_unlock.write(0x00000084u8, &[0x0B, 0x68, 0x07, 0xD0]).unwrap();
-                // i2c1_bus_unlock.write(0x00000086u8, &[0x23, 0x06, 0x60, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x00000088u8, &[0x0C, 0x31, 0x81, 0xB0]).unwrap();
-                // i2c1_bus_unlock.write(0x0000008Au8, &[0x1A, 0xAD, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x0000008Cu8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x0000008Eu8, &[0x00, 0x00, 0x01, 0x2C]).unwrap();
-                // i2c1_bus_unlock.write(0x00000094u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x00000096u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x00000098u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x0000009Au8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x0000009Cu8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x0000009Eu8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x00000090u8, &[0x5F, 0xE8, 0x02, 0x06]).unwrap();
-                // i2c1_bus_unlock.write(0x00000092u8, &[0x74, 0x00, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x000000A4u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x000000A6u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x000000A8u8, &[0x00, 0x00, 0xB0, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x000000AAu8, &[0x40, 0x00, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x000000ACu8, &[0x00, 0x00, 0x01, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x000000AEu8, &[0x00, 0x20, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x000000EAu8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
-                // i2c1_bus_unlock.write(0x000000A0u8, &[0x00, 0xB3, 0x40, 0x7D]).unwrap();
-                // i2c1_bus_unlock.write(0x000000A2u8, &[0x00, 0x00, 0x01, 0xA7]).unwrap();
-            });
-            Mono::delay(100_u64.millis()).await;
-        }
+                    // Next Lines Segfault
+                    // i2c1_bus_unlock.write(0x00000080u8, &[0x44, 0x63, 0x8C, 0x20]).unwrap();
+                    // i2c1_bus_unlock.write(0x00000082u8, &[0x28, 0x3A, 0xF0, 0x64]).unwrap();
+                    // i2c1_bus_unlock.write(0x00000084u8, &[0x0B, 0x68, 0x07, 0xD0]).unwrap();
+                    // i2c1_bus_unlock.write(0x00000086u8, &[0x23, 0x06, 0x60, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x00000088u8, &[0x0C, 0x31, 0x81, 0xB0]).unwrap();
+                    // i2c1_bus_unlock.write(0x0000008Au8, &[0x1A, 0xAD, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x0000008Cu8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x0000008Eu8, &[0x00, 0x00, 0x01, 0x2C]).unwrap();
+                    // i2c1_bus_unlock.write(0x00000094u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x00000096u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x00000098u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x0000009Au8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x0000009Cu8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x0000009Eu8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x00000090u8, &[0x5F, 0xE8, 0x02, 0x06]).unwrap();
+                    // i2c1_bus_unlock.write(0x00000092u8, &[0x74, 0x00, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x000000A4u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x000000A6u8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x000000A8u8, &[0x00, 0x00, 0xB0, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x000000AAu8, &[0x40, 0x00, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x000000ACu8, &[0x00, 0x00, 0x01, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x000000AEu8, &[0x00, 0x20, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x000000EAu8, &[0x00, 0x00, 0x00, 0x00]).unwrap();
+                    // i2c1_bus_unlock.write(0x000000A0u8, &[0x00, 0xB3, 0x40, 0x7D]).unwrap();
+                    // i2c1_bus_unlock.write(0x000000A2u8, &[0x00, 0x00, 0x01, 0xA7]).unwrap();
     }
-
 }
