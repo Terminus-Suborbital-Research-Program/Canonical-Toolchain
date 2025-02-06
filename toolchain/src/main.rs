@@ -56,13 +56,12 @@ mod app {
 
     use super::*;
 
-    use application_layer::CommandPacket;
+    use bin_packets::{CommandPacket, ConnectionTest};
     use bincode::{
         config::standard,
         error::DecodeError::{self, UnexpectedVariant},
     };
     use communications::{
-        application_layer::ConnectionTest,
         link_layer::{LinkLayerDevice, LinkLayerPayload},
         serial_handler::HeaplessString,
         *,
@@ -374,8 +373,7 @@ mod app {
 
                     match packet.payload {
                         LinkLayerPayload::Payload(app_packet) => match app_packet {
-                            application_layer::ApplicationPacket::Command(command) => match command
-                            {
+                            bin_packets::ApplicationPacket::Command(command) => match command {
                                 // Connection test sequence
                                 CommandPacket::ConnectionTest(connection) => match connection {
                                     ConnectionTest::Start => {
@@ -568,6 +566,7 @@ mod app {
             MAX_USB_LINES,
         >,
     ) {
+        use bin_packets::ApplicationPacket;
         use embedded_io::{Read as _, ReadReady as _};
         use heapless::String;
 
@@ -646,9 +645,7 @@ mod app {
 
                 "link-loopback-test" => {
                     // Create a command packet
-                    let packet = application_layer::ApplicationPacket::Command(
-                        CommandPacket::MoveServoDegrees(90),
-                    );
+                    let packet = ApplicationPacket::Command(CommandPacket::MoveServoDegrees(90));
                     let link_packet = ctx
                         .shared
                         .radio_link
@@ -695,9 +692,8 @@ mod app {
                     let mut connection = ConnectionTest::Start;
 
                     loop {
-                        let packet = application_layer::ApplicationPacket::Command(
-                            CommandPacket::ConnectionTest(connection),
-                        );
+                        let packet =
+                            ApplicationPacket::Command(CommandPacket::ConnectionTest(connection));
                         let link_packet = ctx
                             .shared
                             .radio_link
