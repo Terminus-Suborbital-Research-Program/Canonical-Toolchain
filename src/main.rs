@@ -38,7 +38,7 @@ rp235x_timer_monotonic!(Mono);
 #[cfg(feature = "rp2350")]
 pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef::secure_exe();
 
- #[rtic::app(
+#[rtic::app(
     device = hal::pac,
     dispatchers = [PIO2_IRQ_0, PIO2_IRQ_1, DMA_IRQ_0],
 )]
@@ -51,7 +51,7 @@ mod app {
     use actuators::*;
     use application_layer::{CommandPacket, ScientificPacket};
     use bincode::error::DecodeError::UnexpectedVariant;
-    use bmi323::{Bmi323, AccelConfig, GyroConfig, OutputDataRate, AccelerometerRange, GyroscopeRange};
+    // use bmi323::{Bmi323, AccelConfig, GyroConfig, OutputDataRate, AccelerometerRange, GyroscopeRange};
     use communications::{link_layer::LinkLayerDevice, serial_handler::HeaplessString, *};
     use rtic_monotonics::rtic_time::{embedded_hal_async::delay::DelayNs, timer_queue::Delay};
     use sensors::*;
@@ -276,8 +276,6 @@ mod app {
             &mut ctx.device.RESETS, 
             &clocks.system_clock
         );
-
-        i2c1_bus.write(0x2Cu8, &[1, 2, 3]).unwrap();
 
         // let mut imu: Bmi323<bmi323::interface::I2cInterface<I2C<I2C1, (gpio::Pin<gpio::bank0::Gpio14, gpio::FunctionI2c, gpio::PullUp>, gpio::Pin<gpio::bank0::Gpio15, gpio::FunctionI2c, gpio::PullUp>)>>, Mono> = Bmi323::new_with_i2c(i2c1_bus, 0x68, Mono);
         // let accel_config = AccelConfig::builder()
@@ -620,37 +618,15 @@ mod app {
             loop{
                 ctx.shared.i2c1_bus.lock(|i2c1_bus_unlock|{
                     ctx.shared.uart0.lock(|uart0_unlock|{
-                        uart0_unlock.write_full_blocking(b"Start Read\n");
-                        let mut read_data = [0; 32];
-                        for addr in 0..(1 << 7){
-                            if (addr % 16 == 0){
-                                uart0_unlock.write_fmt(format_args!("{:#04x?} ", addr));
-                            }
-                            let ret = 0;
-
-                            // let i2c_result= i2c1_bus_unlock.read(addr as u8, &mut read_data);
-                            // let i2c_value = match i2c_result{
-                            //     Ok(value)=>{
-                            //         if value < 0 {
-                            //             uart0_unlock.write_fmt(format_args!("@"));
-                            //         }
-                            //         else{
-                            //             uart0_unlock.write_fmt(format_args!("."));
-                            //         }
-                            //         if addr % 16 == 15{
-                            //             uart0_unlock.write_fmt(format_args!("\n"));
-                            //         }
-                            //     }
-                            //     _=>{
-                            //         // uart0_unlock.write_fmt(format_args!("Error: {:?}\n", i2c_result.err()));
-                            //     }
-                            // };
-                        }
-                        uart0_unlock.write_fmt(format_args!("Done"));
+                        let mut data: [u8; 1] = [0];
+                        let alt_address: u8 = 0x77;
+                        let register: u8 = 0xD0;
+                        i2c1_bus_unlock.write_read(alt_address, &[register], &mut data);
+                        uart0_unlock.write_fmt(format_args!("Alt Device  {:?}\n", data[0]));
                     });
                 });
+                Mono::delay(1000_u64.millis()).await;
             }
-            // Mono::delay(2000_u64.millis()).await;
             // Next Line Segfaults
                     // i2c1_bus_unlock.write(0x00u8, &[0, 1, 2]).unwrap();
 
