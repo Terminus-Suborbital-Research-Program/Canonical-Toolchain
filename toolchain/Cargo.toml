@@ -16,7 +16,8 @@ cortex-m = "0.7.7"
 # Startup/Runtime for Cortex-M microcontrollers
 cortex-m-rt = "0.7.5"
 # Rust safe bindings to register-level control
-embedded-hal = "1.0.0"
+embedded-hal = {version="1.0.0"}
+embedded_hal_0_2 = {package = "embedded-hal", version = "0.2.5", features = ["unproven"]}
 embedded-io = "0.6.1"
 # Simple panic handler
 panic-halt = "1.0.0"

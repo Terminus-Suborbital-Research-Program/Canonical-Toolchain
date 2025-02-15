@@ -43,15 +43,27 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
     dispatchers = [PIO2_IRQ_0, PIO2_IRQ_1, DMA_IRQ_0],
 )]
 mod app {
+    const XTAL_FREQ_HZ: u32 = 12_000_000u32;
+
     use crate::{
-        actuators::servo::{
-            EjectionServo, EjectionServoMosfet, LockingServo, LockingServoMosfet, Servo,
-            LOCKING_SERVO_LOCKED,
+        actuators::{
+            PWM2a,
+            motor::{
+                Motor,
+                MotorXPWM,
+            },
+            servo::{
+                EjectionServo, EjectionServoMosfet, LockingServo, LockingServoMosfet, Servo,
+                LOCKING_SERVO_LOCKED,
+            }
         },
         communications::{
             hc12::{UART1Bus, GPIO10},
             link_layer::{Device, LinkPacket},
         },
+        sensors::{
+            busses::I2CMainBus
+        }
     };
 
     use super::*;
@@ -68,21 +80,26 @@ mod app {
     };
 
     use canonical_toolchain::{print, println};
-    use embedded_hal::digital::{OutputPin, StatefulOutputPin};
+    use embedded_hal::{
+            digital::{
+                OutputPin, StatefulOutputPin
+            }
+    };
+    use embedded_hal_0_2::blocking::i2c::{Write as I2CWrite, Read as I2CRead};
     use embedded_io::Read;
     use fugit::RateExtU32;
     use hal::{
-        gpio::{self, FunctionSio, PullNone, SioOutput},
+        gpio::{self, FunctionSio, PullDown, PullNone, SioOutput},
         sio::Sio,
+        I2C
     };
     use rp235x_hal::{
         clocks::init_clocks_and_plls,
-        pwm::Slices,
+        pwm::{Slices},
         uart::{DataBits, StopBits, UartConfig, UartPeripheral},
         Clock, Watchdog,
     };
-    const XTAL_FREQ_HZ: u32 = 12_000_000u32;
-
+    use core::mem::MaybeUninit;
     use usb_device::{class_prelude::*, prelude::*};
     use usbd_serial::{embedded_io::Write, SerialPort};
 
@@ -102,6 +119,8 @@ mod app {
             gpio::Pin<gpio::bank0::Gpio1, gpio::FunctionUart, gpio::PullDown>,
         ),
     >;
+    
+
 
     static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
 
@@ -109,8 +128,6 @@ mod app {
 
     #[shared]
     struct Shared {
-        //uart0: UART0Bus,
-        //uart0_buffer: heapless::String<HEAPLESS_STRING_ALLOC_LENGTH>,
         ejector_driver: EjectionServo,
         locking_driver: LockingServo,
         radio_link: LinkLayerDevice<HC12<UART1Bus, GPIO10>>,
@@ -118,14 +135,22 @@ mod app {
         usb_device: UsbDevice<'static, hal::usb::UsbBus>,
         serial_console_writer: serial_handler::SerialWriter,
         clock_freq_hz: u32,
+        motor_x: MotorXPWM
     }
 
     #[local]
     struct Local {
         led: gpio::Pin<gpio::bank0::Gpio25, FunctionSio<SioOutput>, PullNone>,
+        i2c_main_bus: &'static mut I2CMainBus,
+        
     }
 
-    #[init]
+    #[init(local=[
+        // Task local initialized resources are static
+        // Here we use MaybeUninit to allow for initialization in init()
+        // This enables its usage in driver initialization
+        i2c_main_bus_ctx: MaybeUninit<I2CMainBus> = MaybeUninit::uninit()
+    ])]
     fn init(mut ctx: init::Context) -> (Shared, Local) {
         // Reset the spinlocks - this is skipped by soft-reset
         unsafe {
@@ -200,6 +225,21 @@ mod app {
                 .unwrap();
         uart1_peripheral.enable_rx_interrupt(); // Make sure we can drive our interrupts
 
+
+        // Init I2C pins
+        let sda_pin = bank0_pins.gpio14.reconfigure();
+        let scl_pin = bank0_pins.gpio15.reconfigure();
+
+        let i2c_main_bus_tmp: &'static mut _ = ctx.local.i2c_main_bus_ctx.write(I2C::i2c1(
+            ctx.device.I2C1,
+            sda_pin,
+            scl_pin,
+            10.kHz(),
+            &mut ctx.device.RESETS,
+            &clocks.system_clock,
+        ));
+
+
         // Use pin 14 (GPIO10) as the HC12 configuration pin
         let hc12_configure_pin = bank0_pins.gpio10.into_push_pull_output();
         let hc12 = HC12::new(uart1_peripheral, hc12_configure_pin).unwrap();
@@ -235,6 +275,16 @@ mod app {
             Servo::new(locking_channel_a, locking_channel_pin, locking_mosfet_pin);
         locking_servo.set_angle(LOCKING_SERVO_LOCKED);
 
+
+        let mut motor_xy_pwm = pwm_slices.pwm2;
+        motor_xy_pwm.enable();
+        motor_xy_pwm.set_top(65534/2);
+        motor_xy_pwm.set_div_int(1); 
+        let mut motor_x_channel: PWM2a = motor_xy_pwm.channel_a;
+        let motor_x_channel_pin = motor_x_channel.output_to(bank0_pins.gpio4);
+        let mut motor_x = Motor::new(motor_x_channel, motor_x_channel_pin);
+        motor_x.set_speed(0);
+
         // Set up USB Device allocator
         let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
             ctx.device.USB,
@@ -263,6 +313,7 @@ mod app {
         command_handler::spawn(usb_console_command_receiver).ok();
         radio_flush::spawn().ok();
         incoming_packet_handler::spawn().ok();
+        i2c_main_bus_sample::spawn().ok();
 
         // Serial Writer Structure
         let serial_console_writer = serial_handler::SerialWriter::new(usb_console_line_sender);
@@ -278,8 +329,13 @@ mod app {
                 usb_serial: serial,
                 serial_console_writer,
                 clock_freq_hz: clock_freq.to_Hz(),
+                motor_x: motor_x
             },
-            Local { led: led_pin },
+            Local { 
+                led: led_pin,
+                i2c_main_bus: i2c_main_bus_tmp
+
+            },
         )
     }
 
@@ -433,7 +489,7 @@ mod app {
         });
     }
 
-    #[task(priority = 3, shared = [usb_device, usb_serial, serial_console_writer])]
+    #[task(priority = 2, shared = [usb_device, usb_serial, serial_console_writer])]
     async fn usb_console_reader(
         mut ctx: usb_console_reader::Context,
         mut command_sender: Sender<
@@ -499,7 +555,7 @@ mod app {
         }
     }
 
-    #[task(priority = 3, shared = [usb_device, usb_serial])]
+    #[task(priority = 2, shared = [usb_device, usb_serial])]
     async fn usb_serial_console_printer(
         mut ctx: usb_serial_console_printer::Context,
         mut reciever: Receiver<
@@ -556,7 +612,7 @@ mod app {
     }
 
     // Command Handler
-    #[task(shared=[serial_console_writer, radio_link, clock_freq_hz, ejector_driver, locking_driver], priority = 2)]
+    #[task(shared=[serial_console_writer, radio_link, clock_freq_hz, ejector_driver, locking_driver, motor_x], priority = 2)]
     #[cfg(debug_assertions)]
     async fn command_handler(
         mut ctx: command_handler::Context,
@@ -590,6 +646,20 @@ mod app {
                         hal::reboot::RebootArch::Normal,
                     );
                 }
+                
+                "set-motor-x" =>{
+                    // Parse arg as int or fail
+                    let arg = parts
+                        .next()
+                        .unwrap_or_default()
+                        .parse::<u32>()
+                        .unwrap_or_default();
+                        println!(ctx, "Setting Motor Speed");
+                        ctx.shared.motor_x.lock(|channel| {
+                            channel.set_speed(arg as u8);
+                        });
+                }
+
 
                 "set-servo" => {
                     // Parse arg as int or fail
@@ -949,6 +1019,24 @@ mod app {
                 _ => {
                     println!(ctx, "Invalid command: {}", command);
                 }
+            }
+        }
+    }
+
+    #[task(local = [i2c_main_bus], priority = 2)]
+    async fn i2c_main_bus_sample(mut ctx: i2c_main_bus_sample::Context) {
+        let mut motor_x_address = 0x01u8;
+        let motor_isd_address = 0x80u8;
+        let mut data = [0,0,0,0];
+        loop{
+            // motor_x_address = motor_x_address + 1;
+            ctx.local.i2c_main_bus.write(motor_x_address, &mut [0x80, 0x44, 0x63, 0x8C, 0x20]);
+            // ctx.local.i2c_main_bus.write(motor_isd_address, &mut [0x44, 0x63, 0x8C, 0x20]);
+            // Mono::delay(20.millis()).await;
+            ctx.local.i2c_main_bus.read(motor_x_address, &mut data);
+            Mono::delay(500.millis()).await;
+            if motor_x_address == 127{
+                motor_x_address = 0;
             }
         }
     }
