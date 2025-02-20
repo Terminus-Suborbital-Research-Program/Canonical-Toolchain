@@ -176,39 +176,13 @@ mod app {
                 MAX_USB_LINES,
             >,
         );
-    }
 
-    // Updates the radio module on the serial interrupt
-    #[task(binds = UART1_IRQ, shared = [radio_link, serial_console_writer])]
-    fn uart_interrupt(mut ctx: uart_interrupt::Context) {
-        ctx.shared.radio_link.lock(|radio| {
-            radio.device.update().ok();
-        });
-    }
+        // Updates the radio module on the serial interrupt
+        #[task(binds = UART1_IRQ, shared = [radio_link, serial_console_writer])]
+        fn uart_interrupt(mut ctx: uart_interrupt::Context);
 
-    // Radio Flush Task
-    #[task(shared = [radio_link], priority = 1)]
-    async fn radio_flush(mut ctx: radio_flush::Context) {
-        let mut on_board_baudrate: BaudRate = BaudRate::B9600;
-        let bytes_to_flush = 16;
-
-        loop {
-            ctx.shared.radio_link.lock(|radio| {
-                radio.device.flush(bytes_to_flush).ok();
-                on_board_baudrate = radio.device.get_baudrate();
-            });
-
-            // Need to wait wait the in-air baudrate, or the on-board baudrate
-            // whichever is slower
-
-            let mut slower =
-                core::cmp::min(on_board_baudrate.to_u32(), on_board_baudrate.to_in_air_bd());
-
-            // slower is bps, so /1000 to get ms
-            slower = slower / 1000;
-
-            // Delay for that times the number of bytes flushed
-            Mono::delay((slower as u64 * bytes_to_flush as u64).millis()).await;
-        }
+        // Radio Flush Task
+        #[task(shared = [radio_link], priority = 1)]
+        async fn radio_flush(mut ctx: radio_flush::Context);
     }
 }

@@ -10,7 +10,10 @@ use rtic_monotonics::Monotonic;
 
 use crate::{
     app::{incoming_packet_handler, *},
-    communications::link_layer::{LinkLayerPayload, LinkPacket},
+    communications::{
+        hc12::BaudRate,
+        link_layer::{LinkLayerPayload, LinkPacket},
+    },
     Mono,
 };
 
@@ -19,6 +22,36 @@ pub async fn heartbeat(ctx: heartbeat::Context<'_>) {
         _ = ctx.local.led.toggle();
 
         Mono::delay(300_u64.millis()).await;
+    }
+}
+
+pub fn uart_interrupt(mut ctx: uart_interrupt::Context<'_>) {
+    ctx.shared.radio_link.lock(|radio| {
+        radio.device.update().ok();
+    });
+}
+
+pub async fn radio_flush(mut ctx: radio_flush::Context<'_>) {
+    let mut on_board_baudrate: BaudRate = BaudRate::B9600;
+    let bytes_to_flush = 16;
+
+    loop {
+        ctx.shared.radio_link.lock(|radio| {
+            radio.device.flush(bytes_to_flush).ok();
+            on_board_baudrate = radio.device.get_baudrate();
+        });
+
+        // Need to wait wait the in-air baudrate, or the on-board baudrate
+        // whichever is slower
+
+        let mut slower =
+            core::cmp::min(on_board_baudrate.to_u32(), on_board_baudrate.to_in_air_bd());
+
+        // slower is bps, so /1000 to get ms
+        slower = slower / 1000;
+
+        // Delay for that times the number of bytes flushed
+        Mono::delay((slower as u64 * bytes_to_flush as u64).millis()).await;
     }
 }
 
