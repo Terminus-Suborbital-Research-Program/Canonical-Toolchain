@@ -51,52 +51,33 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
 mod app {
     use crate::{
         actuators::servo::{
-            EjectionServo, EjectionServoMosfet, LockingServo, LockingServoMosfet, Servo,
-            LOCKING_SERVO_LOCKED,
+            EjectionServo, LockingServo,
         },
-        communications::{
-            hc12::{UART1Bus, GPIO10},
-            link_layer::{Device, LinkPacket},
-        },
+        communications::hc12::{UART1Bus, GPIO10},
     };
 
     use super::*;
 
-    use bin_packets::packets::{CommandPacket, ConnectionTest};
-    use bincode::{
-        config::standard,
-        error::DecodeError::{self, UnexpectedVariant},
-    };
+    
+    
     use communications::{
-        link_layer::{LinkLayerDevice, LinkLayerPayload},
-        serial_handler::HeaplessString,
+        link_layer::LinkLayerDevice,
         *,
     };
 
-    use canonical_toolchain::{print, println};
-    use embedded_hal::digital::OutputPin;
-    use fugit::RateExtU32;
-    use hal::{
-        gpio::{self, FunctionSio, PullNone, SioOutput},
-        sio::Sio,
-    };
-    use rp235x_hal::{
-        clocks::init_clocks_and_plls,
-        pwm::Slices,
-        uart::{DataBits, StopBits, UartConfig, UartPeripheral},
-        Clock, Watchdog,
-    };
+    
+    
+    
+    use hal::gpio::{self, FunctionSio, PullNone, SioOutput};
+    use rp235x_hal::uart::UartPeripheral;
     pub const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
     use usb_device::{class_prelude::*, prelude::*};
     use usbd_serial::{embedded_io::Write, SerialPort};
 
-    use hc12::{BaudRate, HC12};
+    use hc12::HC12;
 
-    use rtic_sync::{
-        channel::{Receiver, Sender},
-        make_channel,
-    };
+    use rtic_sync::channel::{Receiver, Sender};
     use serial_handler::{HEAPLESS_STRING_ALLOC_LENGTH, MAX_USB_LINES};
 
     pub type UART0Bus = UartPeripheral<
