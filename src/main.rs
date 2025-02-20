@@ -50,35 +50,25 @@ pub static IMAGE_DEF: rp235x_hal::block::ImageDef = rp235x_hal::block::ImageDef:
 )]
 mod app {
     use crate::{
-        actuators::servo::{
-            EjectionServo, LockingServo,
-        },
+        actuators::servo::{EjectionServo, LockingServo},
         communications::hc12::{UART1Bus, GPIO10},
     };
 
     use super::*;
 
-    
-    
-    use communications::{
-        link_layer::LinkLayerDevice,
-        *,
-    };
+    use communications::{link_layer::LinkLayerDevice, *};
 
-    
-    
-    
     use hal::gpio::{self, FunctionSio, PullNone, SioOutput};
     use rp235x_hal::uart::UartPeripheral;
     pub const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
     use usb_device::{class_prelude::*, prelude::*};
-    use usbd_serial::{embedded_io::Write, SerialPort};
 
     use hc12::HC12;
 
     use rtic_sync::channel::{Receiver, Sender};
     use serial_handler::{HEAPLESS_STRING_ALLOC_LENGTH, MAX_USB_LINES};
+    use usbd_serial::SerialPort;
 
     pub type UART0Bus = UartPeripheral<
         rp235x_hal::uart::Enabled,
