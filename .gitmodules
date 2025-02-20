@@ -4,6 +4,3 @@
 [submodule "picotool"]
 	path = picotool
 	url = https://github.com/raspberrypi/picotool.git
-[submodule "bin-packets"]
-	path = bin-packets
-	url = git@github.com:Terminus-Suborbital-Research-Program/bin-packets.git

@@ -40,7 +40,7 @@ heapless = "0.8.0"
 bincode = {version="2.0.0-rc.3", features = ["derive", "alloc"], default-features = false}
 
 # Packets
-bin-packets = {path = "../bin-packets"}
+bin-packets = {git = "https://github.com/Terminus-Suborbital-Research-Program/bin-packets.git"}
 
 # Target features
 [features]

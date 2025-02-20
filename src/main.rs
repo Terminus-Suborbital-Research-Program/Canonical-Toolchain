@@ -56,7 +56,7 @@ mod app {
 
     use super::*;
 
-    use bin_packets::{CommandPacket, ConnectionTest};
+    use bin_packets::packets::{CommandPacket, ConnectionTest};
     use bincode::{
         config::standard,
         error::DecodeError::{self, UnexpectedVariant},
@@ -643,50 +643,6 @@ mod app {
                     });
                 }
 
-                "link-loopback-test" => {
-                    // Create a command packet
-                    let packet = ApplicationPacket::Command(CommandPacket::MoveServoDegrees(90));
-                    let link_packet = ctx
-                        .shared
-                        .radio_link
-                        .lock(|device| device.construct_packet(packet, Device::Icarus));
-
-                    let serialized =
-                        bincode::encode_to_vec(&link_packet, bincode::config::standard()).unwrap();
-
-                    for byte in serialized.iter() {
-                        print!(ctx, "{:02X} ", byte);
-                        Mono::delay(100_u64.millis()).await;
-                    }
-                    println!(ctx, "");
-
-                    ctx.shared.radio_link.lock(|device| {
-                        device.device.write(&serialized).ok();
-                    });
-
-                    println!(ctx, "Sent Packet, waiting");
-
-                    Mono::delay(1000_u64.millis()).await;
-
-                    let packet = ctx.shared.radio_link.lock(|radio| radio.read_link_packet());
-
-                    match packet {
-                        Ok(packet) => {
-                            println!(ctx, "Received Packet:");
-                            let mut buffer_heapless_stirng: String<128> = HeaplessString::new();
-                            write!(buffer_heapless_stirng, "{:?}", packet).ok();
-                            for char in buffer_heapless_stirng.chars() {
-                                print!(ctx, "{}", char);
-                            }
-                            println!(ctx, "");
-                        }
-
-                        Err(e) => {
-                            println!(ctx, "Error receiving packet: {:?}", e);
-                        }
-                    }
-                }
-
                 "transmit-test" => {
                     let mut sequence_number: u8 = 0;
                     let mut connection = ConnectionTest::Start;
@@ -735,58 +691,6 @@ mod app {
                         };
 
                         Mono::delay(200_u64.millis()).await;
-                    }
-                }
-
-                "packet-test" => {
-                    // Create a command packet
-                    let packet = CommandPacket::MoveServoDegrees(90);
-
-                    // Print it
-                    println!(ctx, "{:?}", packet);
-
-                    // Serialize it and print the vector
-                    let serialized =
-                        bincode::encode_to_vec(&packet, bincode::config::standard()).unwrap();
-
-                    for byte in serialized.iter() {
-                        print!(ctx, "{:02X} ", byte);
-                        Mono::delay(100_u64.millis()).await;
-                    }
-                    println!(ctx, "");
-
-                    // Deserialize it and print the packet
-                    let deserialized: CommandPacket;
-                    let _bytes: usize;
-
-                    match bincode::decode_from_slice(&serialized, bincode::config::standard()) {
-                        Ok((packet, bytes)) => {
-                            deserialized = packet;
-                            _bytes = bytes;
-
-                            println!(ctx, "{:?}", deserialized);
-                        }
-
-                        Err(e) => match e {
-                            // Unexpected varient
-                            UnexpectedVariant {
-                                type_name,
-                                allowed,
-                                found,
-                            } => {
-                                println!(ctx, "Unexpected:");
-                                Mono::delay(1000_u64.millis()).await;
-                                println!(ctx, "Type Name: {}", type_name);
-                                Mono::delay(1000_u64.millis()).await;
-                                println!(ctx, "Allowed: {:?}", allowed);
-                                Mono::delay(1000_u64.millis()).await;
-                                println!(ctx, "Found: {:?}", found);
-                            }
-
-                            _ => {
-                                println!(ctx, "Error deserializing packet: {:?}", e);
-                            }
-                        },
                     }
                 }
 
